@@ -41,7 +41,7 @@ Built to be used alongside [Claude Code](https://claude.ai/code): open a termina
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/claude-canvas.git
+git clone https://github.com/gabriel8824/claude-canvas.git
 cd claude-canvas
 npm install
 ```
