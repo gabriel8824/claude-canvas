@@ -6,7 +6,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "postinstall": "chmod +x ../node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
+    "postinstall": "node -e \"const{execSync}=require('child_process');if(process.platform==='darwin'){try{execSync('chmod +x ../node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper')}catch(_){}}\""
   },
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",

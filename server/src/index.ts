@@ -1,19 +1,23 @@
 import express from 'express';
 import http from 'http';
 import fs from 'fs';
-import os from 'os';
 import { spawn, exec } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import path from 'path';
 import { TerminalManager } from './terminal';
-import { listDir, readFile } from './files';
+import { listDir, readFile, safePath, toUnix } from './files';
 import { loadState, saveState } from './db';
+
+/** Expand ~ and normalise separators for cross-platform use. */
+function resolvePath(p: string): string {
+  return safePath(p || '~');
+}
 
 const PORT = Number(process.env.PORT || 3001);
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: [`http://localhost:${PORT}`, 'http://localhost:5173', 'http://127.0.0.1:5173'] }));
 app.use(express.json());
 
 // Serve client build
@@ -34,9 +38,8 @@ app.get('/api/files/read', (req, res) => {
 app.post('/api/files/write', (req, res) => {
   const { path: p, content } = req.body as { path: string; content: string };
   if (!p || typeof content !== 'string') { res.status(400).json({ error: 'missing path or content' }); return; }
-  const expanded = p.startsWith('~/') ? p.replace('~', os.homedir()) : p;
   try {
-    fs.writeFileSync(expanded, content, 'utf-8');
+    fs.writeFileSync(resolvePath(p), content, 'utf-8');
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -45,10 +48,7 @@ app.post('/api/files/write', (req, res) => {
 
 // List all markdown files recursively under a root path
 app.get('/api/docs/list', (req, res) => {
-  let root = (req.query.path as string) || '~';
-  if (!root || root === '~') root = os.homedir();
-  if (root.startsWith('~/')) root = root.replace('~', os.homedir());
-
+  const root = resolvePath(req.query.path as string);
   const results: { path: string; name: string; rel: string }[] = [];
   const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
 
@@ -61,7 +61,7 @@ app.get('/api/docs/list', (req, res) => {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) { walk(full); }
       else if (e.isFile() && /\.(md|mdx)$/i.test(e.name)) {
-        results.push({ path: full, name: e.name, rel: path.relative(root, full) });
+        results.push({ path: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)) });
       }
     }
   }
@@ -72,10 +72,7 @@ app.get('/api/docs/list', (req, res) => {
 
 // Graph view: returns nodes + wiki-link edges for all .md files under a root
 app.get('/api/docs/graph', (req, res) => {
-  let root = (req.query.path as string) || '~';
-  if (!root || root === '~') root = os.homedir();
-  if (root.startsWith('~/')) root = root.replace('~', os.homedir());
-
+  const root = resolvePath(req.query.path as string);
   const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
   const mdFiles: { id: string; name: string }[] = [];
 
@@ -88,7 +85,7 @@ app.get('/api/docs/graph', (req, res) => {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
       else if (e.isFile() && /\.(md|mdx)$/i.test(e.name))
-        mdFiles.push({ id: full, name: e.name.replace(/\.mdx?$/i, '') });
+        mdFiles.push({ id: toUnix(full), name: e.name.replace(/\.mdx?$/i, '') });
     }
   }
   walk(root);
@@ -120,9 +117,7 @@ app.get('/api/docs/graph', (req, res) => {
 });
 
 app.get('/api/files/stat', (req, res) => {
-  let p = (req.query.path as string) || '';
-  if (!p || p === '~') p = os.homedir();
-  if (p.startsWith('~/')) p = p.replace('~', os.homedir());
+  const p = resolvePath(req.query.path as string);
   try {
     const stat = fs.statSync(p);
     res.json({ exists: true, isDir: stat.isDirectory() });
@@ -197,20 +192,21 @@ wss.on('connection', (ws) => {
 
       case 'git:status': {
         const { reqId, path: p } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
-        exec(`git -C "${cwd}" status --porcelain=v1 -b`, (err, stdout, stderr) => {
-          if (err) {
-            send(ws, { type: 'git:status', reqId, raw: '', error: stderr.trim() || err.message });
-          } else {
-            send(ws, { type: 'git:status', reqId, raw: stdout, error: null });
-          }
+        const cwd = resolvePath(p as string);
+        const proc = spawn('git', ['-C', cwd, 'status', '--porcelain=v1', '-b']);
+        let out = '', err = '';
+        proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+        proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+        proc.on('close', (code) => {
+          if (code !== 0) send(ws, { type: 'git:status', reqId, raw: '', error: err.trim() || `exit ${code}` });
+          else send(ws, { type: 'git:status', reqId, raw: out, error: null });
         });
         break;
       }
 
       case 'git:add': {
         const { reqId, path: p, file } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
+        const cwd = resolvePath(p as string);
         const args = file === '.' ? ['-C', cwd, 'add', '.'] : ['-C', cwd, 'add', '--', file as string];
         const proc = spawn('git', args);
         let stderr = '';
@@ -221,7 +217,7 @@ wss.on('connection', (ws) => {
 
       case 'git:restore': {
         const { reqId, path: p, file, staged } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
+        const cwd = resolvePath(p as string);
         const args = staged
           ? ['-C', cwd, 'restore', '--staged', '--', file as string]
           : ['-C', cwd, 'restore', '--', file as string];
@@ -234,7 +230,7 @@ wss.on('connection', (ws) => {
 
       case 'git:commit': {
         const { reqId, path: p, message } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
+        const cwd = resolvePath(p as string);
         const proc = spawn('git', ['-C', cwd, 'commit', '-m', message as string]);
         let out = '', err = '';
         proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
@@ -247,7 +243,7 @@ wss.on('connection', (ws) => {
       case 'git:pull': {
         const op = msg.type === 'git:push' ? 'push' : 'pull';
         const { reqId, path: p } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
+        const cwd = resolvePath(p as string);
         const proc = spawn('git', ['-C', cwd, op], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
         const fwd = (d: Buffer) => send(ws, { type: `git:${op}:output`, reqId, data: d.toString() });
         proc.stdout.on('data', fwd);
@@ -258,20 +254,21 @@ wss.on('connection', (ws) => {
 
       case 'git:log': {
         const { reqId, path: p } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
-        exec(`git -C "${cwd}" log --oneline --decorate -20`, (err, stdout, stderr) => {
-          if (err) {
-            send(ws, { type: 'git:log', reqId, output: '', error: stderr.trim() || err.message });
-          } else {
-            send(ws, { type: 'git:log', reqId, output: stdout, error: null });
-          }
+        const cwd = resolvePath(p as string);
+        const proc = spawn('git', ['-C', cwd, 'log', '--oneline', '--decorate', '-20']);
+        let out = '', err = '';
+        proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+        proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+        proc.on('close', (code) => {
+          if (code !== 0) send(ws, { type: 'git:log', reqId, output: '', error: err.trim() || `exit ${code}` });
+          else send(ws, { type: 'git:log', reqId, output: out, error: null });
         });
         break;
       }
 
       case 'files:write': {
         const { reqId, path: p, content } = msg;
-        const expanded = (p as string).replace(/^~/, os.homedir());
+        const expanded = resolvePath(p as string);
         try {
           fs.writeFileSync(expanded, content as string, 'utf-8');
           send(ws, { type: 'files:write', reqId, error: null });
@@ -281,11 +278,31 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'git:diff': {
+        const { reqId, path: p, file, staged } = msg;
+        const cwd = resolvePath(p as string);
+        const args = staged
+          ? ['-C', cwd, 'diff', '--staged', '--', file as string]
+          : ['-C', cwd, 'diff', '--', file as string];
+        const proc = spawn('git', args);
+        let output = '', err = '';
+        proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
+        proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+        proc.on('close', (code) => {
+          send(ws, { type: 'git:diff', reqId, output: code === 0 ? output : '', error: code !== 0 ? err.trim() : null });
+        });
+        break;
+      }
+
       case 'git:init': {
         const { reqId, path: p } = msg;
-        const cwd = (p as string).replace(/^~/, os.homedir());
-        exec(`git -C "${cwd}" init`, (err, stdout, stderr) => {
-          send(ws, { type: 'git:init', reqId, output: stdout, error: err ? (stderr.trim() || err.message) : null });
+        const cwd = resolvePath(p as string);
+        const proc = spawn('git', ['-C', cwd, 'init']);
+        let out = '', err = '';
+        proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+        proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+        proc.on('close', (code) => {
+          send(ws, { type: 'git:init', reqId, output: out, error: code !== 0 ? (err.trim() || `exit ${code}`) : null });
         });
         break;
       }
@@ -297,7 +314,7 @@ wss.on('connection', (ws) => {
           break;
         }
         // Expand ~ and ensure parent dir exists
-        const expanded = (targetDir as string).replace(/^~/, os.homedir());
+        const expanded = resolvePath(targetDir as string);
         const parent = path.dirname(expanded);
         try { fs.mkdirSync(parent, { recursive: true }); } catch {}
 
@@ -309,7 +326,7 @@ wss.on('connection', (ws) => {
         proc.stderr.on('data', fwd);
         proc.on('error', (err) => send(ws, { type: 'git:clone:error', reqId, message: err.message }));
         proc.on('close', (code) => {
-          if (code === 0) send(ws, { type: 'git:clone:done',  reqId, targetDir: expanded });
+          if (code === 0) send(ws, { type: 'git:clone:done',  reqId, targetDir: toUnix(expanded) });
           else             send(ws, { type: 'git:clone:error', reqId, message: `git clone saiu com código ${code}` });
         });
         break;
@@ -322,13 +339,28 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Native folder picker (macOS)
+// Native folder picker (macOS + Windows + Linux)
 app.get('/api/pick-folder', (_req, res) => {
-  exec(
-    `osascript -e 'tell app "Finder" to POSIX path of (choose folder with prompt "Selecione uma pasta")'`,
-    { timeout: 120_000 },
-    (err, stdout) => res.json({ path: err ? null : stdout.trim() })
-  );
+  if (process.platform === 'win32') {
+    const ps = `Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;$d.Description='Selecione uma pasta';if($d.ShowDialog()-eq'OK'){$d.SelectedPath}`;
+    exec(`powershell -NoProfile -Command "${ps}"`, { timeout: 120_000 }, (err, stdout) => {
+      res.json({ path: err ? null : toUnix(stdout.trim()) || null });
+    });
+  } else if (process.platform === 'darwin') {
+    exec(
+      `osascript -e 'tell app "Finder" to POSIX path of (choose folder with prompt "Selecione uma pasta")'`,
+      { timeout: 120_000 },
+      (err, stdout) => res.json({ path: err ? null : toUnix(stdout.trim()) || null })
+    );
+  } else {
+    // Linux: try zenity (GNOME), then kdialog (KDE), then fall back to null
+    exec('zenity --file-selection --directory --title="Selecione uma pasta"', { timeout: 120_000 }, (err, stdout) => {
+      if (!err && stdout.trim()) { res.json({ path: stdout.trim() }); return; }
+      exec('kdialog --getexistingdirectory ~', { timeout: 120_000 }, (err2, stdout2) => {
+        res.json({ path: !err2 && stdout2.trim() ? stdout2.trim() : null });
+      });
+    });
+  }
 });
 
 // Probe: check if a URL is reachable (used by preview to wait for dev server)
@@ -350,9 +382,16 @@ app.get('/api/probe', async (req, res) => {
 app.post('/api/git/generate-commit', (req, res) => {
   const { path: p } = req.body as { path: string };
   if (!p) { res.status(400).json({ error: 'missing path' }); return; }
-  const cwd = p.replace(/^~/, os.homedir());
+  const cwd = resolvePath(p);
 
-  exec(`git -C "${cwd}" diff --staged`, async (err, diff) => {
+  // Use spawn to avoid shell injection with user-supplied paths
+  const gitProc = spawn('git', ['-C', cwd, 'diff', '--staged']);
+  let diff = '', diffErr = '';
+  gitProc.stdout.on('data', (d: Buffer) => { diff += d.toString(); });
+  gitProc.stderr.on('data', (d: Buffer) => { diffErr += d.toString(); });
+  gitProc.on('error', (err) => res.status(500).json({ error: err.message }));
+  gitProc.on('close', async (code) => {
+    const err = code !== 0 ? new Error(diffErr || `git exit ${code}`) : null;
     if (err) { res.status(500).json({ error: err.message }); return; }
 
     const trimmedDiff = diff.slice(0, 12000); // cap at ~12k chars

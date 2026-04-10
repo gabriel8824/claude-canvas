@@ -6,13 +6,10 @@ async function hasObsidianVault(folderPath: string): Promise<boolean> {
     // Strip trailing slash so path joining is clean
     const clean = folderPath.replace(/\/+$/, '');
     const statPath = clean + '/.obsidian';
-    console.log('[hasObsidianVault] checking:', statPath);
     const r = await fetch(`/api/files/stat?path=${encodeURIComponent(statPath)}`);
     const json = await r.json();
-    console.log('[hasObsidianVault] result:', json);
     return !!(json.exists && json.isDir);
-  } catch (e) {
-    console.error('[hasObsidianVault] error:', e);
+  } catch {
     return false;
   }
 }
@@ -295,7 +292,11 @@ function serializeState(state: ReturnType<typeof useCanvasStore.getState>): stri
   });
 }
 
+const LS_KEY = 'claude-canvas:state';
+
 async function persistNow(serialized: string) {
+  // Always keep localStorage in sync as a fallback
+  try { localStorage.setItem(LS_KEY, serialized); } catch {}
   const res = await fetch('/api/state', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },

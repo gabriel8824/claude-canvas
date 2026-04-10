@@ -353,6 +353,8 @@ export function PreviewNode({ nodeId, data, width, height }: Props) {
     let url = inputUrl.trim();
     if (!url) return;
     if (!url.match(/^https?:\/\//)) url = 'http://' + url;
+    try { new URL(url); } catch { return; } // reject malformed URLs
+    if (!url.startsWith('http://') && !url.startsWith('https://')) return; // block javascript: etc.
     setLoadedUrl(url);
     updateNodeData(nodeId, { url, inputUrl: url });
     setLoading(true);

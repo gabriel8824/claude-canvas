@@ -11,17 +11,31 @@ export function App() {
   const [showGitHub,      setShowGitHub]      = useState(false);
 
   useEffect(() => {
+    const LS_KEY = 'claude-canvas:state';
+    function tryLoadLS() {
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return false;
+        const state = JSON.parse(raw) as SerializedState;
+        if (state && Array.isArray(state.nodes) && state.nodes.length > 0) {
+          hydrate(state);
+          return true;
+        }
+      } catch {}
+      return false;
+    }
+
     fetch('/api/state')
       .then(r => r.json())
       .then(({ state }) => {
         if (state && Array.isArray((state as SerializedState).nodes) && (state as SerializedState).nodes.length > 0) {
           hydrate(state as SerializedState);
-        } else {
+        } else if (!tryLoadLS()) {
           addNode('terminal', { x: 80, y: 80 });
         }
       })
       .catch(() => {
-        addNode('terminal', { x: 80, y: 80 });
+        if (!tryLoadLS()) addNode('terminal', { x: 80, y: 80 });
       });
   }, []);
 

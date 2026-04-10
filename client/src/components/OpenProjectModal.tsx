@@ -149,7 +149,10 @@ export function OpenProjectModal({ onClose }: Props) {
                         {p.split('/').filter(Boolean).pop()}
                       </div>
                       <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
-                        {p.replace(/^\/Users\/[^/]+/, '~')}
+                        {p
+                          .replace(/^\/Users\/[^/]+/, '~')         // macOS
+                          .replace(/^[A-Za-z]:\/Users\/[^/]+/, '~') // Windows via toUnix
+                          .replace(/^\/home\/[^/]+/, '~')}          {/* Linux */}
                       </div>
                     </div>
                     <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)', flexShrink: 0 }}>→</span>

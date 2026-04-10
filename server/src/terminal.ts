@@ -20,11 +20,12 @@ export class TerminalManager {
       this.kill(id);
     }
 
-    const shell = os.platform() === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
+    const isWin = os.platform() === 'win32';
+    const shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/sh');
     const safeCwd = this.resolveCwd(cwd);
 
     const proc = pty.spawn(shell, [], {
-      name: 'xterm-256color',
+      name: isWin ? 'cmd' : 'xterm-256color',
       cols: cols || 80,
       rows: rows || 24,
       cwd: safeCwd,
@@ -62,7 +63,7 @@ export class TerminalManager {
 
   private resolveCwd(cwd: string): string {
     if (!cwd || cwd === '~') return os.homedir();
-    if (cwd.startsWith('~/')) return cwd.replace('~', os.homedir());
+    if (cwd.startsWith('~/') || cwd.startsWith('~\\')) return os.homedir() + cwd.slice(1);
     try {
       const fs = require('fs');
       if (fs.existsSync(cwd)) return cwd;

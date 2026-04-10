@@ -10,10 +10,21 @@ export interface FileItem {
   ext?: string;
 }
 
-function safePath(p: string): string {
+/** Normalize a file-system path for cross-platform use.
+ *  - Expands leading ~ to the home directory
+ *  - Converts backslashes to forward slashes (Windows → universal)
+ */
+export function safePath(p: string): string {
   if (!p || p === '~') return os.homedir();
-  if (p.startsWith('~/')) return p.replace('~', os.homedir());
+  if (p.startsWith('~/') || p.startsWith('~\\')) {
+    p = os.homedir() + p.slice(1);
+  }
   return p;
+}
+
+/** Returns an absolute path with forward slashes, safe to send to the client. */
+export function toUnix(p: string): string {
+  return p.split(path.sep).join('/');
 }
 
 export function listDir(dirPath: string): FileItem[] {
@@ -27,7 +38,7 @@ export function listDir(dirPath: string): FileItem[] {
         const isDir = e.isDirectory();
         const item: FileItem = {
           name: e.name,
-          path: full,
+          path: toUnix(full),
           type: isDir ? 'dir' : 'file',
         };
         if (!isDir) {
