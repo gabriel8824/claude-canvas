@@ -132,6 +132,15 @@ function TerminalPane({
       const termNode = store.nodes.find(n => n.id === nodeId);
       if (!termNode) return;
 
+      // Check if a preview linked to this terminal already exists — avoid duplicates on reload
+      const existing = store.nodes.find(
+        n => n.type === 'preview' && (n.data as PreviewData).linkedTerminalId === nodeId
+      );
+      if (existing) {
+        store.updateNodeData(existing.id, { url: detectedUrl, inputUrl: detectedUrl } as Partial<PreviewData>);
+        return;
+      }
+
       const group = store.groups.find(g => g.nodeIds.includes(nodeId));
       const prevNode = store.addNode('preview', { x: termNode.x + termNode.width + 36, y: termNode.y }, {
         title: `Preview :${urlMatch[1]}`,
@@ -594,6 +603,15 @@ function SinglePaneLegacy({ nodeId, data, active, width, height, updateNodeData 
       const store = useCanvasStore.getState();
       const termNode = store.nodes.find(n => n.id === nodeId);
       if (!termNode) return;
+
+      // Check if a preview linked to this terminal already exists — avoid duplicates on reload
+      const existing = store.nodes.find(
+        n => n.type === 'preview' && (n.data as PreviewData).linkedTerminalId === nodeId
+      );
+      if (existing) {
+        store.updateNodeData(existing.id, { url: detectedUrl, inputUrl: detectedUrl } as Partial<PreviewData>);
+        return;
+      }
 
       const group = store.groups.find(g => g.nodeIds.includes(nodeId));
       const prevNode = store.addNode('preview', { x: termNode.x + termNode.width + 36, y: termNode.y }, {
