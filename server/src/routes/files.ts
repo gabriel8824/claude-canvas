@@ -7,19 +7,60 @@ import { resolvePath } from '../utils';
 
 const router = express.Router();
 
-// List directory
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__', '.cache']);
+const WIKI_LINK = /\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]/g;
+
+// ─── Shared recursive walker ───────────────────────────────────────────────────
+
+interface WalkOptions {
+  /** Return true to include a file, false to skip */
+  fileFilter?: (entry: fs.Dirent) => boolean;
+  /** Return true to skip a directory */
+  dirSkip?: (name: string) => boolean;
+  /** Return true to skip a file/dir by name (dotfiles etc.) */
+  nameSkip?: (name: string) => boolean;
+  /** Stop walking when this returns true */
+  done?: () => boolean;
+  maxDepth?: number;
+}
+
+function walkDir(
+  dir: string,
+  onFile: (full: string, entry: fs.Dirent) => void,
+  opts: WalkOptions = {},
+  depth = 0
+): void {
+  if (opts.done?.()) return;
+  if (opts.maxDepth !== undefined && depth > opts.maxDepth) return;
+
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+  for (const e of entries) {
+    if (opts.done?.()) return;
+    if (opts.nameSkip?.(e.name)) continue;
+    if (e.isDirectory()) {
+      if (SKIP_DIRS.has(e.name)) continue;
+      if (opts.dirSkip?.(e.name)) continue;
+      walkDir(path.join(dir, e.name), onFile, opts, depth + 1);
+    } else if (e.isFile()) {
+      if (!opts.fileFilter || opts.fileFilter(e)) {
+        onFile(path.join(dir, e.name), e);
+      }
+    }
+  }
+}
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
+
 router.get('/api/files', (req, res) => {
-  const dir = (req.query.path as string) || '~';
-  res.json({ items: listDir(dir) });
+  res.json({ items: listDir((req.query.path as string) || '~') });
 });
 
-// Read file
 router.get('/api/files/read', (req, res) => {
-  const filePath = (req.query.path as string) || '';
-  res.json(readFile(filePath));
+  res.json(readFile((req.query.path as string) || ''));
 });
 
-// Write file
 router.post('/api/files/write', (req, res) => {
   const { path: p, content } = req.body as { path: string; content: string };
   if (!p || typeof content !== 'string') { res.status(400).json({ error: 'missing path or content' }); return; }
@@ -31,18 +72,15 @@ router.post('/api/files/write', (req, res) => {
   }
 });
 
-// Stat file/dir
 router.get('/api/files/stat', (req, res) => {
-  const p = resolvePath(req.query.path as string);
   try {
-    const stat = fs.statSync(p);
+    const stat = fs.statSync(resolvePath(req.query.path as string));
     res.json({ exists: true, isDir: stat.isDirectory() });
   } catch {
     res.json({ exists: false, isDir: false });
   }
 });
 
-// Create file or directory
 router.post('/api/files/create', (req, res) => {
   const { path: p, type } = req.body as { path: string; type: 'file' | 'dir' };
   if (!p) { res.status(400).json({ error: 'missing path' }); return; }
@@ -52,11 +90,8 @@ router.post('/api/files/create', (req, res) => {
       fs.mkdirSync(fullPath, { recursive: true });
     } else {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      if (!fs.existsSync(fullPath)) {
-        fs.writeFileSync(fullPath, '', 'utf-8');
-      } else {
-        res.status(400).json({ error: 'Arquivo já existe' }); return;
-      }
+      if (fs.existsSync(fullPath)) { res.status(400).json({ error: 'Arquivo já existe' }); return; }
+      fs.writeFileSync(fullPath, '', 'utf-8');
     }
     res.json({ ok: true });
   } catch (err: any) {
@@ -64,32 +99,27 @@ router.post('/api/files/create', (req, res) => {
   }
 });
 
-// Rename file or directory
 router.post('/api/files/rename', (req, res) => {
   const { oldPath, newPath } = req.body as { oldPath: string; newPath: string };
   if (!oldPath || !newPath) { res.status(400).json({ error: 'missing oldPath or newPath' }); return; }
   try {
-    const resolvedOld = resolvePath(oldPath);
-    const resolvedNew = resolvePath(newPath);
-    fs.renameSync(resolvedOld, resolvedNew);
+    fs.renameSync(resolvePath(oldPath), resolvePath(newPath));
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Delete file or directory (recursive)
 router.delete('/api/files/delete', (req, res) => {
   const p = (req.query.path as string) || '';
   if (!p) { res.status(400).json({ error: 'missing path' }); return; }
   const fullPath = resolvePath(p);
+  const homeDir = os.homedir();
+  const isRoot = fullPath === '/' || /^[A-Za-z]:[\\\/]?$/.test(fullPath);
+  if (fullPath === homeDir || isRoot || fullPath.length < 4) {
+    res.status(403).json({ error: 'Operação não permitida neste caminho' }); return;
+  }
   try {
-    const homeDir = os.homedir();
-    // Protect home dir, Unix root (/), Windows drive roots (C:\ or C:/), and suspiciously short paths
-    const isRoot = fullPath === '/' || /^[A-Za-z]:[\\\/]?$/.test(fullPath);
-    if (fullPath === homeDir || isRoot || fullPath.length < 4) {
-      res.status(403).json({ error: 'Operação não permitida neste caminho' }); return;
-    }
     fs.rmSync(fullPath, { recursive: true, force: true });
     res.json({ ok: true });
   } catch (err: any) {
@@ -97,97 +127,59 @@ router.delete('/api/files/delete', (req, res) => {
   }
 });
 
-// List all files recursively (for fuzzy finder)
+// Fuzzy finder: all files recursively
 router.get('/api/files/list-all', (req, res) => {
   const root = resolvePath(req.query.path as string);
-  const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__', '.cache']);
+  const MAX = 5000;
   const results: { name: string; path: string; rel: string }[] = [];
-  let count = 0;
-  const MAX_FILES = 5000;
 
-  function walk(dir: string) {
-    if (count >= MAX_FILES) return;
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (count >= MAX_FILES) return;
-      if (e.name.startsWith('.') && e.name !== '.env') continue;
-      if (SKIP.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        walk(full);
-      } else if (e.isFile()) {
-        results.push({
-          name: e.name,
-          path: toUnix(full),
-          rel: toUnix(path.relative(root, full)),
-        });
-        count++;
-      }
-    }
-  }
+  walkDir(root, (full, e) => {
+    results.push({ name: e.name, path: toUnix(full), rel: toUnix(path.relative(root, full)) });
+  }, {
+    nameSkip: (n) => n.startsWith('.') && n !== '.env',
+    done: () => results.length >= MAX,
+  });
 
-  try { walk(root); } catch {}
   res.json({ files: results });
 });
 
-// List all markdown files recursively
+// List all markdown files
 router.get('/api/docs/list', (req, res) => {
   const root = resolvePath(req.query.path as string);
   const results: { path: string; name: string; rel: string }[] = [];
-  const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
 
-  function walk(dir: string) {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (e.name.startsWith('.') && e.name !== '.') continue;
-      if (SKIP.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) { walk(full); }
-      else if (e.isFile() && /\.(md|mdx)$/i.test(e.name)) {
-        results.push({ path: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)) });
-      }
-    }
-  }
+  walkDir(root, (full, e) => {
+    results.push({ path: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)) });
+  }, {
+    fileFilter: (e) => /\.(md|mdx)$/i.test(e.name),
+    nameSkip: (n) => n.startsWith('.'),
+  });
 
-  try { walk(root); } catch {}
   res.json({ files: results });
 });
 
 // Graph view: nodes + wiki-link edges for all .md files
 router.get('/api/docs/graph', (req, res) => {
   const root = resolvePath(req.query.path as string);
-  const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
   const mdFiles: { id: string; name: string }[] = [];
 
-  function walk(dir: string) {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (e.name.startsWith('.')) continue;
-      if (SKIP.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.isFile() && /\.(md|mdx)$/i.test(e.name))
-        mdFiles.push({ id: toUnix(full), name: e.name.replace(/\.mdx?$/i, '') });
-    }
-  }
-  walk(root);
+  walkDir(root, (full, e) => {
+    mdFiles.push({ id: toUnix(full), name: e.name.replace(/\.mdx?$/i, '') });
+  }, {
+    fileFilter: (e) => /\.(md|mdx)$/i.test(e.name),
+    nameSkip: (n) => n.startsWith('.'),
+  });
 
-  const nameMap = new Map<string, string>();
-  for (const f of mdFiles) nameMap.set(f.name.toLowerCase(), f.id);
-
-  const WIKI = /\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]/g;
+  const nameMap = new Map<string, string>(mdFiles.map(f => [f.name.toLowerCase(), f.id]));
   const linkSet = new Set<string>();
   const links: { source: string; target: string }[] = [];
 
   for (const f of mdFiles) {
     let content = '';
     try { content = fs.readFileSync(f.id, 'utf-8').slice(0, 50_000); } catch { continue; }
-    WIKI.lastIndex = 0;
+    WIKI_LINK.lastIndex = 0;
     let m: RegExpExecArray | null;
-    while ((m = WIKI.exec(content)) !== null) {
+    while ((m = WIKI_LINK.exec(content)) !== null) {
       const target = nameMap.get(m[1].trim().toLowerCase());
       if (target && target !== f.id) {
         const key = f.id < target ? `${f.id}→${target}` : `${target}→${f.id}`;
@@ -202,46 +194,27 @@ router.get('/api/docs/graph', (req, res) => {
 // Full-text search in markdown files
 router.get('/api/docs/search', (req, res) => {
   const root = resolvePath(req.query.path as string);
-  const query = (req.query.q as string || '').toLowerCase().trim();
+  const query = ((req.query.q as string) || '').toLowerCase().trim();
   if (!query) { res.json({ results: [] }); return; }
 
-  const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
   const results: { file: string; name: string; rel: string; snippet: string; line: number }[] = [];
 
-  function walk(dir: string) {
-    if (results.length >= 50) return;
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (results.length >= 50) return;
-      if (e.name.startsWith('.')) continue;
-      if (SKIP.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.isFile() && /\.(md|mdx)$/i.test(e.name)) {
-        let content = '';
-        try { content = fs.readFileSync(full, 'utf-8'); } catch { continue; }
-        const lines = content.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].toLowerCase().includes(query)) {
-            const snippetStart = Math.max(0, i - 1);
-            const snippetEnd = Math.min(lines.length, i + 2);
-            const snippet = lines.slice(snippetStart, snippetEnd).join('\n');
-            results.push({
-              file: toUnix(full),
-              name: e.name,
-              rel: toUnix(path.relative(root, full)),
-              snippet,
-              line: i + 1,
-            });
-            if (results.length >= 50) break;
-          }
-        }
+  walkDir(root, (full, e) => {
+    let content = '';
+    try { content = fs.readFileSync(full, 'utf-8'); } catch { return; }
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length && results.length < 50; i++) {
+      if (lines[i].toLowerCase().includes(query)) {
+        const snippet = lines.slice(Math.max(0, i - 1), Math.min(lines.length, i + 2)).join('\n');
+        results.push({ file: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)), snippet, line: i + 1 });
       }
     }
-  }
+  }, {
+    fileFilter: (e) => /\.(md|mdx)$/i.test(e.name),
+    nameSkip: (n) => n.startsWith('.'),
+    done: () => results.length >= 50,
+  });
 
-  walk(root);
   res.json({ results });
 });
 
@@ -252,34 +225,25 @@ router.get('/api/docs/backlinks', (req, res) => {
   if (!targetFile) { res.json({ backlinks: [] }); return; }
 
   const targetName = path.basename(targetFile, path.extname(targetFile)).toLowerCase();
-  const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', '__pycache__']);
-  const WIKI = /\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]/g;
   const backlinks: { file: string; name: string; rel: string }[] = [];
 
-  function walk(dir: string) {
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (e.name.startsWith('.')) continue;
-      if (SKIP.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.isFile() && /\.(md|mdx)$/i.test(e.name) && toUnix(full) !== targetFile) {
-        let content = '';
-        try { content = fs.readFileSync(full, 'utf-8').slice(0, 50_000); } catch { continue; }
-        WIKI.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = WIKI.exec(content)) !== null) {
-          if (m[1].trim().toLowerCase() === targetName) {
-            backlinks.push({ file: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)) });
-            break;
-          }
-        }
+  walkDir(root, (full, e) => {
+    if (toUnix(full) === targetFile) return;
+    let content = '';
+    try { content = fs.readFileSync(full, 'utf-8').slice(0, 50_000); } catch { return; }
+    WIKI_LINK.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = WIKI_LINK.exec(content)) !== null) {
+      if (m[1].trim().toLowerCase() === targetName) {
+        backlinks.push({ file: toUnix(full), name: e.name, rel: toUnix(path.relative(root, full)) });
+        break;
       }
     }
-  }
+  }, {
+    fileFilter: (e) => /\.(md|mdx)$/i.test(e.name),
+    nameSkip: (n) => n.startsWith('.'),
+  });
 
-  walk(root);
   res.json({ backlinks });
 });
 

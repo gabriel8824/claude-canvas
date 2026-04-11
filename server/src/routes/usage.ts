@@ -323,7 +323,9 @@ async function parseSession(
 // ── Discover all session JSONL files ─────────────────────────────────────────
 
 function findSessionFiles(): string[] {
-  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+  const claudeDir = process.platform === 'win32'
+    ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude', 'projects')
+    : path.join(os.homedir(), '.claude', 'projects');
   const files: string[] = [];
 
   let projects: fs.Dirent[];

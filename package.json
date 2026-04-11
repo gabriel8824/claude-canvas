@@ -2,6 +2,7 @@
   "name": "claude-canvas",
   "version": "1.0.0",
   "private": true,
+  "main": "electron/main.js",
   "workspaces": [
     "server",
     "client"
@@ -14,20 +15,102 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
     "test": "vitest run --reporter=verbose",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "electron:dev": "electron .",
+    "electron:build": "npm run build && npx @electron/rebuild -f -w better-sqlite3,node-pty && electron-builder --mac --config.mac.identity=null",
+    "electron:build:win": "npm run build && npx @electron/rebuild -f -w better-sqlite3,node-pty && electron-builder --win",
+    "electron:build:linux": "npm run build && npx @electron/rebuild -f -w better-sqlite3,node-pty && electron-builder --linux"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
     "@eslint/js": "^9.0.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
     "@vitest/coverage-v8": "^2.0.0",
     "concurrently": "^8.2.2",
+    "esbuild": "^0.21.0",
+    "electron-builder": "^24.13.3",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.0",
     "globals": "^15.0.0",
     "prettier": "^3.2.0",
     "typescript-eslint": "^7.0.0",
+    "electron": "^31.0.0",
     "vitest": "^2.0.0"
+  },
+  "build": {
+    "appId": "com.gabriellenon.claude-canvas",
+    "productName": "Claude Canvas",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*",
+      "!node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "server/dist/bundle.js",
+        "to": "server/dist/bundle.js"
+      },
+      {
+        "from": "node_modules/better-sqlite3",
+        "to": "server/node_modules/better-sqlite3"
+      },
+      {
+        "from": "node_modules/bindings",
+        "to": "server/node_modules/bindings"
+      },
+      {
+        "from": "node_modules/file-uri-to-path",
+        "to": "server/node_modules/file-uri-to-path"
+      },
+      {
+        "from": "node_modules/node-pty",
+        "to": "server/node_modules/node-pty"
+      },
+      {
+        "from": "client/dist",
+        "to": "client/dist"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "electron/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Claude Canvas ${version}",
+      "icon": "electron/icon.icns",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ],
+      "window": { "width": 540, "height": 380 }
+    },
+    "win": {
+      "icon": "electron/icon.png",
+      "target": [
+        { "target": "nsis",     "arch": ["x64", "arm64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "linux": {
+      "icon": "electron/icon.png",
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

@@ -1029,12 +1029,13 @@ export function Canvas() {
         style={{
           position: 'fixed', inset: 0,
           background: `
-            radial-gradient(ellipse at 15% 25%, rgba(110,50,220,0.14) 0%, transparent 55%),
-            radial-gradient(ellipse at 85% 15%, rgba(40,100,255,0.14) 0%, transparent 55%),
-            radial-gradient(ellipse at 55% 85%, rgba(0,190,140,0.08) 0%, transparent 45%),
-            radial-gradient(ellipse at 75% 60%, rgba(200,50,120,0.06) 0%, transparent 40%),
-            linear-gradient(145deg, #05080f 0%, #07091a 50%, #050810 100%)
+            radial-gradient(ellipse at 15% 25%, rgba(110,50,220,0.10) 0%, transparent 55%),
+            radial-gradient(ellipse at 85% 15%, rgba(40,100,255,0.10) 0%, transparent 55%),
+            radial-gradient(ellipse at 55% 85%, rgba(0,190,140,0.06) 0%, transparent 45%),
+            radial-gradient(ellipse at 75% 60%, rgba(200,50,120,0.04) 0%, transparent 40%),
+            rgba(5, 8, 16, 0.08)
           `,
+          backdropFilter: 'blur(0px)',
           overflow: 'hidden',
           cursor: pending ? 'crosshair' : linkingFromGroupId ? 'crosshair' : canvasDrag ? 'grabbing' : 'default',
         }}

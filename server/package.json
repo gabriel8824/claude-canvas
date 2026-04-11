@@ -4,12 +4,11 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "build": "tsc",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/bundle.js --external:better-sqlite3 --external:node-pty",
     "start": "node dist/index.js",
-    "postinstall": "node -e \"const{execSync}=require('child_process');if(process.platform==='darwin'){const arch=process.arch==='arm64'?'arm64':'x64';try{execSync('chmod +x ../node_modules/node-pty/prebuilds/darwin-'+arch+'/spawn-helper')}catch(_){}}\""
+    "postinstall": "node -e \"const{execSync}=require('child_process');const p=process.platform,a=process.arch==='arm64'?'arm64':'x64';if(p==='darwin'||p==='linux'){try{execSync('chmod +x ../node_modules/node-pty/prebuilds/'+p+'-'+a+'/spawn-helper')}catch(_){}}\""
   },
   "dependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.8.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
@@ -17,6 +16,7 @@
     "ws": "^8.16.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",

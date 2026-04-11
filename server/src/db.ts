@@ -87,6 +87,13 @@ export function deleteWorkspace(name: string): void {
     .run(name);
 }
 
+export function closeDb(): void {
+  if (db) {
+    try { db.close(); } catch {}
+    db = null;
+  }
+}
+
 export function renameWorkspace(oldName: string, newName: string): void {
   const row = getDb()
     .prepare('SELECT state, updated_at FROM workspaces WHERE name = ?')

@@ -12,6 +12,7 @@ import aiRouter from './routes/ai';
 import dbRouter from './routes/db';
 import { createProcessesRouter } from './routes/processes';
 import usageRouter from './routes/usage';
+import { closeDb } from './db';
 
 const PORT = Number(process.env.PORT || 3001);
 
@@ -64,5 +65,11 @@ server.listen(PORT, () => {
   console.log(`\n🎨 Claude Canvas server running at http://localhost:${PORT}\n`);
 });
 
-process.on('SIGTERM', () => { termManager.killAll(); process.exit(0); });
-process.on('SIGINT', () => { termManager.killAll(); process.exit(0); });
+function shutdown() {
+  termManager.killAll();
+  closeDb();
+  process.exit(0);
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT',  shutdown);

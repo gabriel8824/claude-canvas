@@ -3,39 +3,44 @@ import type { ClientMessage, ServerMessage } from './ws-types';
 type AnyMessage = Record<string, unknown>;
 type Handler = (msg: AnyMessage) => void;
 
+const QUEUE_MAX      = 500;
+const BACKOFF_BASE   = 1_000;   // 1s
+const BACKOFF_MAX    = 30_000;  // 30s
+
 class WSClient {
   private ws: WebSocket | null = null;
   private handlers = new Map<string, Set<Handler>>();
   private queue: string[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private attempts = 0;
 
   connect() {
-    if (this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return;
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/ws`;
-    this.ws = new WebSocket(url);
+    this.ws = new WebSocket(`${proto}://${location.host}/ws`);
 
     this.ws.onopen = () => {
-      console.log('[WS] connected');
+      this.attempts = 0;
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      // Flush queued messages
       while (this.queue.length) this.ws!.send(this.queue.shift()!);
       this.emit('__connected', {});
     };
 
     this.ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data) as AnyMessage;
-        const handlers = this.handlers.get(msg.type as string);
-        if (handlers) handlers.forEach(h => h(msg));
-        const all = this.handlers.get('*');
-        if (all) all.forEach(h => h(msg));
-      } catch {}
+      let msg: AnyMessage;
+      try { msg = JSON.parse(e.data) as AnyMessage; } catch { return; }
+      this.handlers.get(msg.type as string)?.forEach(h => h(msg));
+      this.handlers.get('*')?.forEach(h => h(msg));
     };
 
     this.ws.onclose = () => {
-      console.log('[WS] disconnected, reconnecting...');
       this.emit('__disconnected', {});
-      this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+      this.scheduleReconnect();
     };
 
     this.ws.onerror = () => {
@@ -43,11 +48,24 @@ class WSClient {
     };
   }
 
+  private scheduleReconnect() {
+    if (this.reconnectTimer !== null) return;
+    // Exponential backoff: 1s, 2s, 4s, 8s … capped at 30s
+    const delay = Math.min(BACKOFF_BASE * 2 ** this.attempts, BACKOFF_MAX);
+    this.attempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
   send(msg: ClientMessage | AnyMessage) {
     const data = JSON.stringify(msg);
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(data);
     } else {
+      // Drop oldest messages when queue is full to avoid unbounded growth
+      if (this.queue.length >= QUEUE_MAX) this.queue.shift();
       this.queue.push(data);
       this.connect();
     }
