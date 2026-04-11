@@ -1,4 +1,7 @@
-type Handler = (msg: Record<string, any>) => void;
+import type { ClientMessage, ServerMessage } from './ws-types';
+
+type AnyMessage = Record<string, unknown>;
+type Handler = (msg: AnyMessage) => void;
 
 class WSClient {
   private ws: WebSocket | null = null;
@@ -21,8 +24,8 @@ class WSClient {
 
     this.ws.onmessage = (e) => {
       try {
-        const msg = JSON.parse(e.data);
-        const handlers = this.handlers.get(msg.type);
+        const msg = JSON.parse(e.data) as AnyMessage;
+        const handlers = this.handlers.get(msg.type as string);
         if (handlers) handlers.forEach(h => h(msg));
         const all = this.handlers.get('*');
         if (all) all.forEach(h => h(msg));
@@ -40,7 +43,7 @@ class WSClient {
     };
   }
 
-  send(msg: Record<string, any>) {
+  send(msg: ClientMessage | AnyMessage) {
     const data = JSON.stringify(msg);
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(data);
@@ -50,13 +53,18 @@ class WSClient {
     }
   }
 
+  on<T extends ServerMessage['type']>(
+    type: T,
+    handler: (msg: Extract<ServerMessage, { type: T }>) => void
+  ): () => void;
+  on(type: string, handler: Handler): () => void;
   on(type: string, handler: Handler): () => void {
     if (!this.handlers.has(type)) this.handlers.set(type, new Set());
     this.handlers.get(type)!.add(handler);
     return () => this.handlers.get(type)?.delete(handler);
   }
 
-  private emit(type: string, msg: Record<string, any>) {
+  private emit(type: string, msg: AnyMessage) {
     this.handlers.get(type)?.forEach(h => h(msg));
   }
 }

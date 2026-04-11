@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  claude-canvas:
+    build: .
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      - PORT=${PORT:-3001}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DB_PATH=${DB_PATH:-/data/claude-canvas.db}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3001}
+    volumes:
+      - canvas-data:/data
+      - ${HOME:-~}:/root:ro   # read-only home dir access for file browsing
+    restart: unless-stopped
+
+  # Development override (hot-reload)
+  claude-canvas-dev:
+    build:
+      context: .
+      target: server-builder
+    ports:
+      - "3001:3001"
+      - "5173:5173"
+    environment:
+      - NODE_ENV=development
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./server/src:/app/server/src
+      - ./client/src:/app/client/src
+      - ${HOME:-~}:/root
+    command: sh -c "cd /app/server && npm run dev & cd /app/client && npm run dev"
+    profiles:
+      - dev
+
+volumes:
+  canvas-data:

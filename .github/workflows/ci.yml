@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type check (client)
+        run: npx tsc --noEmit
+        working-directory: client
+
+      - name: Type check (server)
+        run: npx tsc --noEmit
+        working-directory: server
+
+      - name: Build client
+        run: npm run build
+        working-directory: client
+
+      - name: Build server
+        run: npm run build
+        working-directory: server

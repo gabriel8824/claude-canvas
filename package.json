@@ -10,9 +10,24 @@
     "dev": "concurrently -k -n server,client -c blue,green \"npm run dev --workspace=server\" \"npm run dev --workspace=client\"",
     "build": "npm run build --workspace=client && npm run build --workspace=server",
     "start": "npm run start --workspace=server",
-    "install:all": "npm install"
+    "install:all": "npm install",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
+    "test": "vitest run --reporter=verbose",
+    "test:watch": "vitest"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "@eslint/js": "^9.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.0",
+    "globals": "^15.0.0",
+    "prettier": "^3.2.0",
+    "typescript-eslint": "^7.0.0",
+    "vitest": "^2.0.0"
   }
 }

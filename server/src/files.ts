@@ -11,13 +11,14 @@ export interface FileItem {
 }
 
 /** Normalize a file-system path for cross-platform use.
- *  - Expands leading ~ to the home directory
- *  - Converts backslashes to forward slashes (Windows → universal)
+ *  - Expands leading ~ to the home directory using path.join (handles Windows separators)
+ *  - Leaves other paths unchanged; callers must use path.join for concatenation
  */
 export function safePath(p: string): string {
   if (!p || p === '~') return os.homedir();
+  // Support both Unix (~/) and Windows (~\) tilde prefix
   if (p.startsWith('~/') || p.startsWith('~\\')) {
-    p = os.homedir() + p.slice(1);
+    return path.join(os.homedir(), p.slice(2));
   }
   return p;
 }

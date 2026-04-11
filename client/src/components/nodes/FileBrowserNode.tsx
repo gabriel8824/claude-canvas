@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { ws } from '../../ws';
-import { FilesData, EditorData, TerminalData, PreviewData, CanvasNode } from '../../types';
+import { FilesData, EditorData, EditorTab, TerminalData, PreviewData, CanvasNode } from '../../types';
 import { useCanvasStore } from '../../store';
+import { showToast } from '../Toast';
 
 interface FItem {
   name: string;
@@ -61,14 +62,19 @@ export function FileBrowserNode({ nodeId, data }: Props) {
   const [loadingDirs,   setLoadingDirs]   = useState<Set<string>>(new Set());
   const [selectedPath,  setSelectedPath]  = useState<string | null>(null);
   const [hoveredPath,   setHoveredPath]   = useState<string | null>(null);
+  const [contextMenu,   setContextMenu]   = useState<{
+    x: number; y: number; item: FItem | null; parentDir: string;
+  } | null>(null);
+  const [renaming,      setRenaming]      = useState<{ path: string; name: string } | null>(null);
+  const [creating,      setCreating]      = useState<{ parentDir: string; type: 'file' | 'dir'; name: string } | null>(null);
 
   const reqCounter = useRef(0);
-  const { updateNodeData, addNode, nodes, bringToFront, addNodeToGroup } = useCanvasStore();
+  const { updateNodeData, addNode, bringToFront, addNodeToGroup } = useCanvasStore();
 
   // ── Load a directory ────────────────────────────────────────────────────────
   const loadDir = useCallback((path: string) => {
     setLoadingDirs(prev => new Set(prev).add(path));
-    const reqId = `files-${++reqCounter.current}`;
+    const reqId = `files-${nodeId}-${++reqCounter.current}`;
     const unsub = ws.on('files:list', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub();
@@ -109,17 +115,60 @@ export function FileBrowserNode({ nodeId, data }: Props) {
   // ── Open file in an editor node ─────────────────────────────────────────────
   function openFile(filePath: string) {
     setSelectedPath(filePath);
-
     const state = useCanvasStore.getState();
-
-    // If already open, just focus it
-    const existing = state.nodes.find(n => n.type === 'editor' && (n.data as unknown as EditorData).filePath === filePath);
-    if (existing) { bringToFront(existing.id); return; }
 
     // Find which group this file browser belongs to
     const group = state.groups.find(g => g.nodeIds.includes(nodeId));
 
-    // Place editor to the right of all nodes in the group (or use default placement)
+    // Check if any existing editor node already has this file as a tab
+    const existingWithFile = state.nodes.find(n => {
+      if (n.type !== 'editor') return false;
+      const d = n.data as EditorData;
+      if (d.tabs && d.tabs.length > 0) {
+        return d.tabs.some(t => t.filePath === filePath);
+      }
+      return d.filePath === filePath; // legacy
+    });
+
+    if (existingWithFile) {
+      bringToFront(existingWithFile.id);
+      // Switch to that tab
+      const d = existingWithFile.data as EditorData;
+      if (d.tabs) {
+        const tab = d.tabs.find(t => t.filePath === filePath);
+        if (tab) {
+          updateNodeData(existingWithFile.id, { activeTabId: tab.id } as Partial<EditorData>);
+        }
+      }
+      return;
+    }
+
+    // Check if there's a group editor node to add a tab to
+    if (group) {
+      const groupEditorNode = state.nodes.find(n => n.type === 'editor' && group.nodeIds.includes(n.id));
+      if (groupEditorNode) {
+        bringToFront(groupEditorNode.id);
+        const d = groupEditorNode.data as EditorData;
+        const newTab: EditorTab = {
+          id: `tab-${Date.now()}`,
+          filePath,
+          isDirty: false,
+        };
+        const currentTabs = d.tabs && d.tabs.length > 0
+          ? d.tabs
+          : (d.filePath ? [{ id: `tab-legacy-${Date.now()}`, filePath: d.filePath, isDirty: d.isDirty ?? false }] : []);
+        updateNodeData(groupEditorNode.id, {
+          tabs: [...currentTabs, newTab],
+          activeTabId: newTab.id,
+        } as Partial<EditorData>);
+        // Update title to show filename
+        const store = useCanvasStore.getState();
+        store.updateNode(groupEditorNode.id, { title: filePath.split('/').pop() || filePath });
+        return;
+      }
+    }
+
+    // No existing editor in group, create new node
     let position: { x: number; y: number } | undefined;
     if (group) {
       const groupNodes = group.nodeIds
@@ -131,13 +180,83 @@ export function FileBrowserNode({ nodeId, data }: Props) {
     }
 
     const fileName = filePath.split('/').pop() || filePath;
+    const tabId = `tab-${Date.now()}`;
     const newNode = addNode('editor', position, {
       title: fileName,
-      data: { filePath, isDirty: false, openedFromNodeId: nodeId } as unknown as EditorData,
+      data: {
+        tabs: [{ id: tabId, filePath, isDirty: false }],
+        activeTabId: tabId,
+        openedFromNodeId: nodeId,
+      } as EditorData,
     });
 
-    // Add to the same group
     if (group) addNodeToGroup(group.id, newNode.id);
+  }
+
+  // ── Context menu close on outside click ─────────────────────────────────────
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [contextMenu]);
+
+  // ── Context menu actions ─────────────────────────────────────────────────────
+  async function createItem(parentDir: string, name: string, type: 'file' | 'dir') {
+    const newPath = parentDir.replace(/\/$/, '') + '/' + name;
+    const res = await fetch('/api/files/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: newPath, type }),
+    });
+    const d = await res.json();
+    if (d.error) { showToast(d.error, 'error'); }
+    else {
+      showToast(`${type === 'dir' ? 'Pasta' : 'Arquivo'} criado: ${name}`, 'success');
+      setDirContents(prev => { const m = new Map(prev); m.delete(parentDir); return m; });
+      loadDir(parentDir);
+      if (!expandedDirs.has(parentDir)) {
+        setExpandedDirs(prev => new Set(prev).add(parentDir));
+      }
+    }
+    setContextMenu(null);
+    setCreating(null);
+  }
+
+  async function renameItem(oldPath: string, newName: string) {
+    const parts = oldPath.split('/');
+    parts[parts.length - 1] = newName;
+    const newPath = parts.join('/');
+    const res = await fetch('/api/files/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oldPath, newPath }),
+    });
+    const d = await res.json();
+    if (d.error) { showToast(d.error, 'error'); }
+    else {
+      showToast(`Renomeado para: ${newName}`, 'success');
+      const parentDir = oldPath.split('/').slice(0, -1).join('/');
+      setDirContents(prev => { const m = new Map(prev); m.delete(parentDir); return m; });
+      loadDir(parentDir);
+    }
+    setRenaming(null);
+  }
+
+  async function deleteItem(itemPath: string, itemName: string) {
+    if (!confirm(`Deletar "${itemName}"? Esta ação não pode ser desfeita.`)) return;
+    const res = await fetch(`/api/files/delete?path=${encodeURIComponent(itemPath)}`, {
+      method: 'DELETE',
+    });
+    const d = await res.json();
+    if (d.error) { showToast(d.error, 'error'); }
+    else {
+      showToast(`Deletado: ${itemName}`, 'success');
+      const parentDir = itemPath.split('/').slice(0, -1).join('/');
+      setDirContents(prev => { const m = new Map(prev); m.delete(parentDir); return m; });
+      loadDir(parentDir);
+    }
+    setContextMenu(null);
   }
 
   // ── Initial load ────────────────────────────────────────────────────────────
@@ -162,6 +281,15 @@ export function FileBrowserNode({ nodeId, data }: Props) {
             onClick={() => { if (isDir) toggleDir(item.path); else setSelectedPath(item.path); }}
             onMouseEnter={() => setHoveredPath(item.path)}
             onMouseLeave={() => setHoveredPath(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setContextMenu({
+                x: e.clientX, y: e.clientY,
+                item,
+                parentDir: isDir ? item.path : item.path.split('/').slice(0, -1).join('/'),
+              });
+            }}
             style={{
               display: 'flex', alignItems: 'center', gap: 4,
               paddingLeft: indent, paddingRight: 6,
@@ -190,15 +318,34 @@ export function FileBrowserNode({ nodeId, data }: Props) {
               {isDir ? (isExpanded ? '📂' : '📁') : getIcon(item)}
             </span>
 
-            {/* Name */}
-            <span style={{
-              fontSize: 13, flex: 1,
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              color: isDir ? 'rgba(200,215,245,0.85)' : getFileColor(item.ext || ''),
-              fontFamily: 'monospace',
-            }}>
-              {item.name}
-            </span>
+            {/* Name (inline rename) */}
+            {renaming && renaming.path === item.path ? (
+              <input
+                autoFocus
+                defaultValue={renaming.name}
+                style={{
+                  flex: 1, background: 'rgba(255,255,255,0.08)',
+                  border: '1px solid rgba(100,160,255,0.5)',
+                  borderRadius: 4, color: 'rgba(220,230,245,0.9)',
+                  fontSize: 12, padding: '1px 5px', fontFamily: 'monospace', outline: 'none',
+                }}
+                onClick={e => e.stopPropagation()}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { renameItem(renaming.path, (e.target as HTMLInputElement).value); }
+                  if (e.key === 'Escape') setRenaming(null);
+                }}
+                onBlur={e => renameItem(renaming.path, e.target.value)}
+              />
+            ) : (
+              <span style={{
+                fontSize: 13, flex: 1,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                color: isDir ? 'rgba(200,215,245,0.85)' : getFileColor(item.ext || ''),
+                fontFamily: 'monospace',
+              }}>
+                {item.name}
+              </span>
+            )}
 
             {/* Hover actions */}
             {showActions && !isDir && (
@@ -312,8 +459,137 @@ export function FileBrowserNode({ nodeId, data }: Props) {
         {!isRootLoading && rootItems && renderItems(rootItems, 0)}
       </div>
 
+      {/* Inline create row */}
+      {creating && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', background: 'rgba(100,160,255,0.06)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <span style={{ fontSize: 12 }}>{creating.type === 'dir' ? '📁' : '📄'}</span>
+          <input
+            autoFocus
+            value={creating.name}
+            placeholder={creating.type === 'dir' ? 'Nova pasta…' : 'Novo arquivo…'}
+            onChange={e => setCreating(prev => prev ? { ...prev, name: e.target.value } : null)}
+            style={{
+              flex: 1, background: 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(100,160,255,0.4)',
+              borderRadius: 4, color: 'rgba(220,230,245,0.9)',
+              fontSize: 12, padding: '2px 6px', fontFamily: 'monospace', outline: 'none',
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && creating.name.trim()) {
+                createItem(creating.parentDir, creating.name.trim(), creating.type);
+              }
+              if (e.key === 'Escape') setCreating(null);
+            }}
+            onBlur={() => setCreating(null)}
+          />
+        </div>
+      )}
+
       {/* NPM Scripts panel */}
       <ScriptsPanel rootPath={rootPath} fileBrowserNodeId={nodeId} />
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            left: contextMenu.x, top: contextMenu.y,
+            zIndex: 99999,
+            background: 'rgba(8,12,28,0.97)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: 10,
+            padding: '4px 0',
+            minWidth: 180,
+            boxShadow: '0 16px 48px rgba(0,0,0,0.8)',
+            fontSize: 12,
+            fontFamily: 'monospace',
+          }}
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+        >
+          <div
+            style={ctxItemStyle}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onClick={() => {
+              setCreating({ parentDir: contextMenu.parentDir, type: 'file', name: '' });
+              setContextMenu(null);
+            }}
+          >
+            📄 Novo arquivo
+          </div>
+          <div
+            style={ctxItemStyle}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onClick={() => {
+              setCreating({ parentDir: contextMenu.parentDir, type: 'dir', name: '' });
+              setContextMenu(null);
+            }}
+          >
+            📁 Nova pasta
+          </div>
+          {contextMenu.item && (
+            <>
+              <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', margin: '4px 0' }} />
+              <div
+                style={ctxItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                onClick={() => {
+                  if (contextMenu.item) {
+                    setRenaming({ path: contextMenu.item.path, name: contextMenu.item.name });
+                  }
+                  setContextMenu(null);
+                }}
+              >
+                ✏️ Renomear
+              </div>
+              <div
+                style={{ ...ctxItemStyle, color: 'rgba(255,100,100,0.85)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,80,80,0.08)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                onClick={() => {
+                  if (contextMenu.item) deleteItem(contextMenu.item.path, contextMenu.item.name);
+                }}
+              >
+                🗑️ Deletar
+              </div>
+              <div
+                style={ctxItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                onClick={() => {
+                  if (contextMenu.item) {
+                    navigator.clipboard.writeText(contextMenu.item.path).then(() => {
+                      showToast('Caminho copiado!', 'success');
+                    });
+                  }
+                  setContextMenu(null);
+                }}
+              >
+                📋 Copiar caminho
+              </div>
+              {contextMenu.item.type === 'file' && (
+                <>
+                  <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', margin: '4px 0' }} />
+                  <div
+                    style={ctxItemStyle}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    onClick={() => {
+                      if (contextMenu.item) openFile(contextMenu.item.path);
+                      setContextMenu(null);
+                    }}
+                  >
+                    📝 Abrir no editor
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -323,6 +599,12 @@ const btn: React.CSSProperties = {
   border: '1px solid rgba(255,255,255,0.08)',
   borderRadius: 5, color: 'rgba(255,255,255,0.4)',
   cursor: 'pointer', padding: '2px 7px', fontSize: 12, flexShrink: 0,
+};
+
+const ctxItemStyle: React.CSSProperties = {
+  padding: '6px 14px', cursor: 'pointer', color: 'rgba(220,230,245,0.85)',
+  display: 'flex', alignItems: 'center', gap: 8,
+  background: 'transparent',
 };
 
 // ── NPM Scripts panel ────────────────────────────────────────────────────────

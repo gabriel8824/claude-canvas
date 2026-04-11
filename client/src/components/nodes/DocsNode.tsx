@@ -6,6 +6,14 @@ import { GraphView } from './GraphView';
 
 interface MdFile { path: string; name: string; rel: string; }
 
+interface SearchResult {
+  file: string;
+  name: string;
+  rel: string;
+  snippet: string;
+  line: number;
+}
+
 interface Props {
   nodeId: string;
   data: DocsData;
@@ -25,6 +33,9 @@ const md = new Marked({
       return `<a href="${href ?? ''}" title="${title ?? ''}" target="_blank" rel="noopener">${text}</a>`;
     },
     code({ text, lang }) {
+      if (lang === 'mermaid') {
+        return `<div class="mermaid-block" data-code="${encodeURIComponent(text)}"></div>`;
+      }
       const escaped = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       return `<div class="code-block"><div class="code-lang">${lang ?? 'text'}</div><pre><code>${escaped}</code></pre></div>`;
     },
@@ -134,7 +145,56 @@ export function DocsNode({ nodeId, data, width }: Props) {
   const [rootInput, setRootInput]   = useState(data.rootPath || '~');
   const contentRef                  = useRef<HTMLDivElement>(null);
 
+  // Full-text search state
+  const [searchQuery,   setSearchQuery]   = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searching,     setSearching]     = useState(false);
+  const [showSearch,    setShowSearch]    = useState(false);
+
+  // Backlinks state
+  const [backlinks, setBacklinks] = useState<Array<{ file: string; name: string; rel: string }>>([]);
+
   useEffect(() => { injectCss(); }, []);
+
+  // Dynamically load mermaid from CDN
+  useEffect(() => {
+    if ((window as any).mermaid) return;
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+    script.onload = () => {
+      (window as any).mermaid?.initialize({ startOnLoad: false, theme: 'dark' });
+    };
+    document.head.appendChild(script);
+  }, []);
+
+  // Render mermaid blocks after HTML content changes
+  useEffect(() => {
+    const container = contentRef.current;
+    if (!container) return;
+    const tryRender = () => {
+      if (!(window as any).mermaid) return;
+      const blocks = container.querySelectorAll('.mermaid-block');
+      blocks.forEach(async (block: Element) => {
+        const el = block as HTMLElement;
+        if (el.dataset.rendered) return;
+        el.dataset.rendered = 'true';
+        const code = decodeURIComponent(el.dataset.code || '');
+        try {
+          const id = `m${Date.now()}${Math.random().toString(36).slice(2)}`;
+          const { svg } = await (window as any).mermaid.render(id, code);
+          el.innerHTML = svg;
+          el.style.cssText = 'background: rgba(255,255,255,0.03); border-radius: 8px; padding: 16px; margin: 8px 0; overflow: auto;';
+        } catch (e) {
+          el.textContent = `Mermaid error: ${e}`;
+          el.style.color = '#f87171';
+        }
+      });
+    };
+    // Try immediately, and retry after a short delay in case mermaid hasn't loaded yet
+    tryRender();
+    const timer = setTimeout(tryRender, 800);
+    return () => clearTimeout(timer);
+  }, [html]);
 
   // Load file list
   const loadFiles = useCallback((root: string) => {
@@ -151,6 +211,27 @@ export function DocsNode({ nodeId, data, width }: Props) {
   }, []);
 
   useEffect(() => { loadFiles(data.rootPath || '~'); }, [data.rootPath]);
+
+  // Full-text search
+  async function doSearch(q: string) {
+    if (!q.trim()) { setSearchResults([]); return; }
+    setSearching(true);
+    try {
+      const res = await fetch(`/api/docs/search?path=${encodeURIComponent(data.rootPath || '~')}&q=${encodeURIComponent(q)}`);
+      const { results } = await res.json();
+      setSearchResults(results || []);
+    } catch {}
+    finally { setSearching(false); }
+  }
+
+  // Load backlinks when currentFile changes
+  useEffect(() => {
+    if (!data.currentFile || !data.rootPath) { setBacklinks([]); return; }
+    fetch(`/api/docs/backlinks?rootPath=${encodeURIComponent(data.rootPath)}&file=${encodeURIComponent(data.currentFile)}`)
+      .then(r => r.json())
+      .then(({ backlinks: bl }) => setBacklinks(bl || []))
+      .catch(() => setBacklinks([]));
+  }, [data.currentFile, data.rootPath]);
 
   // Open a file
   const openFile = useCallback((filePath: string) => {
@@ -373,9 +454,87 @@ export function DocsNode({ nodeId, data, width }: Props) {
             {currentFile ? currentFile.split('/').pop()?.replace(/\.mdx?$/, '') : '—'}
           </span>
           <NavBtn onClick={() => loadFiles(data.rootPath || '~')} title="Recarregar">↺</NavBtn>
+          <button
+            onClick={() => { setShowSearch(s => !s); }}
+            title="Busca full-text"
+            style={{
+              background: showSearch ? 'rgba(140,100,255,0.25)' : 'rgba(255,255,255,0.04)',
+              border: showSearch ? '1px solid rgba(140,100,255,0.45)' : '1px solid rgba(255,255,255,0.08)',
+              borderRadius: 5, cursor: 'pointer',
+              color: showSearch ? 'rgba(200,170,255,0.95)' : 'rgba(255,255,255,0.5)',
+              width: 24, height: 24, fontSize: 13,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            }}
+          >
+            🔍
+          </button>
           <ViewToggle mode={viewMode} onChange={setViewMode} />
           <ObsidianBtn rootPath={data.rootPath} currentFile={currentFile} />
         </div>
+
+        {/* Full-text search panel */}
+        {showSearch && (
+          <div style={{ flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.02)' }}>
+            <div style={{ padding: '6px 10px', display: 'flex', gap: 6 }}>
+              <input
+                autoFocus
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') doSearch(searchQuery); if (e.key === 'Escape') setShowSearch(false); }}
+                placeholder="Buscar em todos os documentos…"
+                style={{
+                  flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 6, padding: '5px 8px', fontSize: 12,
+                  color: 'rgba(215,230,250,0.9)', outline: 'none', fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={() => doSearch(searchQuery)}
+                disabled={searching}
+                style={{
+                  background: 'rgba(140,100,255,0.2)', border: '1px solid rgba(140,100,255,0.35)',
+                  borderRadius: 6, color: 'rgba(200,170,255,0.95)', cursor: 'pointer',
+                  padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                  opacity: searching ? 0.5 : 1,
+                }}
+              >
+                {searching ? '…' : 'Buscar'}
+              </button>
+            </div>
+            {searchResults.length > 0 && (
+              <div style={{ maxHeight: 240, overflow: 'auto', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                {searchResults.map((r, i) => (
+                  <div
+                    key={`${r.file}-${r.line}-${i}`}
+                    onClick={() => { navigate(r.file); setShowSearch(false); setSearchQuery(''); setSearchResults([]); }}
+                    style={{
+                      padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.03)',
+                    }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)'; }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                      <span style={{ fontSize: 11, color: 'rgba(140,190,255,0.85)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                        {r.name.replace(/\.mdx?$/, '')}
+                      </span>
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace', flexShrink: 0 }}>
+                        :{r.line}
+                      </span>
+                    </div>
+                    <pre style={{ margin: 0, fontSize: 10, fontFamily: 'monospace', color: 'rgba(200,215,240,0.55)', whiteSpace: 'pre-wrap', lineHeight: 1.4, maxHeight: 48, overflow: 'hidden' }}>
+                      {r.snippet}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+            {searchResults.length === 0 && searchQuery && !searching && (
+              <div style={{ padding: '6px 10px', fontSize: 11, color: 'rgba(255,255,255,0.25)', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                Nenhum resultado para "{searchQuery}"
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Rendered markdown or graph */}
         {viewMode === 'graph' ? (
@@ -398,10 +557,34 @@ export function DocsNode({ nodeId, data, width }: Props) {
             ) : !html ? (
               <EmptyContent files={files} onSelect={navigate} />
             ) : (
-              <div
-                className="docs-content"
-                dangerouslySetInnerHTML={{ __html: html }}
-              />
+              <>
+                <div
+                  className="docs-content"
+                  dangerouslySetInnerHTML={{ __html: html }}
+                />
+                {backlinks.length > 0 && (
+                  <div style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', letterSpacing: '0.08em', marginBottom: 10 }}>
+                      BACKLINKS ({backlinks.length})
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {backlinks.map(bl => (
+                        <button
+                          key={bl.file}
+                          onClick={() => navigate(bl.file)}
+                          style={{
+                            background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                            borderRadius: 6, padding: '5px 10px', cursor: 'pointer', textAlign: 'left',
+                            color: 'rgba(140,190,255,0.8)', fontSize: 12, fontFamily: 'monospace',
+                          }}
+                        >
+                          ← {bl.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

@@ -10,13 +10,16 @@ import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
-import { EditorData } from '../../types';
+import { EditorData, EditorTab } from '../../types';
 import { useCanvasStore } from '../../store';
 
 interface Props {
   nodeId: string;
   data: EditorData;
 }
+
+let tabCounter = 0;
+function makeTabId() { return `tab-${++tabCounter}-${Date.now()}`; }
 
 function langFor(ext: string) {
   switch (ext.toLowerCase()) {
@@ -31,6 +34,16 @@ function langFor(ext: string) {
     case 'py':                          return python();
     default:                            return null;
   }
+}
+
+function langLabel(ext: string): string {
+  const m: Record<string, string> = {
+    ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX',
+    json: 'JSON', css: 'CSS', html: 'HTML', md: 'Markdown',
+    py: 'Python', rs: 'Rust', sh: 'Shell', txt: 'Text',
+    gitignore: 'Git', env: 'Env',
+  };
+  return m[ext.toLowerCase()] ?? (ext.toUpperCase() || 'Text');
 }
 
 const EDITOR_THEME = EditorView.theme({
@@ -54,44 +67,127 @@ const EDITOR_THEME = EditorView.theme({
   '.cm-matchingBracket': { background: 'rgba(100,200,100,0.15)', outline: '1px solid rgba(100,200,100,0.4)' },
 });
 
+// Per-tab editor view cache: tabId → EditorView
+const tabViewCache = new Map<string, EditorView>();
+
 export function EditorNode({ nodeId, data }: Props) {
-  const containerRef                    = useRef<HTMLDivElement>(null);
-  const viewRef                         = useRef<EditorView | null>(null);
-  const { updateNodeData }              = useCanvasStore();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { updateNodeData } = useCanvasStore();
 
-  const [status,   setStatus]   = useState<'loading' | 'ready' | 'saving' | 'error'>('loading');
+  // Normalize data: handle legacy single-file format
+  const tabs: EditorTab[] = (() => {
+    if (data.tabs && data.tabs.length > 0) return data.tabs;
+    // Legacy: migrate single filePath to tabs
+    if (data.filePath) {
+      return [{ id: makeTabId(), filePath: data.filePath, isDirty: data.isDirty ?? false }];
+    }
+    return [];
+  })();
+
+  const activeTabId = data.activeTabId || tabs[0]?.id || '';
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0] ?? null;
+
+  const [status, setStatus] = useState<'loading' | 'ready' | 'saving' | 'error'>('loading');
   const [errorMsg, setErrorMsg] = useState('');
-  const [isDirty,  setIsDirty]  = useState(false);
-  const [saveMsg,  setSaveMsg]  = useState('');
+  const [saveMsg, setSaveMsg] = useState('');
 
-  const filePath = data.filePath;
-  const ext      = filePath.split('.').pop() ?? '';
-  const fileName = filePath.split('/').pop() ?? filePath;
+  // ── Switch active tab ──────────────────────────────────────────────────────
+  function switchTab(tabId: string) {
+    // Detach current view from DOM before switching
+    if (activeTabId) {
+      const currentView = tabViewCache.get(activeTabId);
+      if (currentView && containerRef.current?.contains(currentView.dom)) {
+        currentView.dom.remove();
+      }
+    }
+    updateNodeData(nodeId, { activeTabId: tabId } as Partial<EditorData>);
+  }
 
-  // ── Load via REST (avoids all WebSocket timing issues) ──────────────────────
+  // ── Close tab ─────────────────────────────────────────────────────────────
+  function closeTab(tabId: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    const tab = tabs.find(t => t.id === tabId);
+    if (tab?.isDirty) {
+      if (!confirm(`Fechar ${tab.filePath.split('/').pop()} sem salvar?`)) return;
+    }
+    // Destroy cached view
+    const view = tabViewCache.get(tabId);
+    if (view) { view.destroy(); tabViewCache.delete(tabId); }
+
+    const newTabs = tabs.filter(t => t.id !== tabId);
+    const newActiveId = tabId === activeTabId
+      ? (newTabs[newTabs.length - 1]?.id || '')
+      : activeTabId;
+
+    updateNodeData(nodeId, { tabs: newTabs, activeTabId: newActiveId } as Partial<EditorData>);
+  }
+
+  // ── Load file into CodeMirror ──────────────────────────────────────────────
   useEffect(() => {
-    if (!filePath) {
+    if (!activeTab || !activeTab.filePath) {
       setStatus('error');
-      setErrorMsg('Caminho do arquivo não definido.');
+      setErrorMsg(tabs.length === 0 ? 'Nenhum arquivo aberto.' : 'Arquivo não definido.');
+      return;
+    }
+
+    const { filePath } = activeTab;
+    const ext = filePath.split('.').pop() ?? '';
+
+    // Check if we have a cached view for this tab
+    const cachedView = tabViewCache.get(activeTab.id);
+    if (cachedView && containerRef.current) {
+      // Re-attach cached view
+      if (!containerRef.current.contains(cachedView.dom)) {
+        containerRef.current.innerHTML = '';
+        containerRef.current.appendChild(cachedView.dom);
+      }
+      setStatus('ready');
       return;
     }
 
     let cancelled = false;
     setStatus('loading');
-    setIsDirty(false);
 
     fetch(`/api/files/read?path=${encodeURIComponent(filePath)}`)
       .then(r => r.json())
       .then(({ content, error }: { content: string; error?: string }) => {
         if (cancelled) return;
-
-        if (error) {
-          setStatus('error');
-          setErrorMsg(error);
-          return;
-        }
+        if (error) { setStatus('error'); setErrorMsg(error); return; }
 
         const lang = langFor(ext);
+        const tabId = activeTab.id;
+
+        function doSave() {
+          const view = tabViewCache.get(tabId);
+          if (!view) return;
+          const currentContent = view.state.doc.toString();
+          setStatus('saving');
+          fetch('/api/files/write', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: filePath, content: currentContent }),
+          })
+            .then(r => r.json())
+            .then(({ error: e }) => {
+              if (e) { setStatus('error'); setErrorMsg(e); }
+              else {
+                setStatus('ready');
+                // Mark tab as clean
+                const st = useCanvasStore.getState();
+                const d = st.nodes.find(n => n.id === nodeId)?.data as EditorData | undefined;
+                if (d) {
+                  const updatedTabs = (d.tabs || []).map(t =>
+                    t.id === tabId ? { ...t, isDirty: false } : t
+                  );
+                  st.updateNodeData(nodeId, { tabs: updatedTabs } as Partial<EditorData>);
+                }
+                setSaveMsg('Salvo');
+                setTimeout(() => setSaveMsg(''), 2000);
+              }
+            })
+            .catch(err => { setStatus('error'); setErrorMsg(String(err)); });
+        }
+
         const state = EditorState.create({
           doc: content ?? '',
           extensions: [
@@ -108,22 +204,26 @@ export function EditorNode({ nodeId, data }: Props) {
             ]),
             EditorView.updateListener.of(upd => {
               if (upd.docChanged) {
-                setIsDirty(true);
-                updateNodeData(nodeId, { isDirty: true });
+                // Mark active tab as dirty
+                const st = useCanvasStore.getState();
+                const d = st.nodes.find(n => n.id === nodeId)?.data as EditorData | undefined;
+                if (d) {
+                  const updatedTabs = (d.tabs || []).map(t =>
+                    t.id === tabId ? { ...t, isDirty: true } : t
+                  );
+                  st.updateNodeData(nodeId, { tabs: updatedTabs } as Partial<EditorData>);
+                }
               }
             }),
             ...(lang ? [lang] : []),
           ] as import('@codemirror/state').Extension[],
         });
 
-        // Destroy any previous view first
-        viewRef.current?.destroy();
-        viewRef.current = null;
-
         if (containerRef.current) {
-          viewRef.current = new EditorView({ state, parent: containerRef.current });
+          containerRef.current.innerHTML = '';
+          const view = new EditorView({ state, parent: containerRef.current });
+          tabViewCache.set(tabId, view);
         }
-
         setStatus('ready');
       })
       .catch(err => {
@@ -132,82 +232,143 @@ export function EditorNode({ nodeId, data }: Props) {
         setErrorMsg(String(err));
       });
 
-    return () => {
-      cancelled = true;
-      viewRef.current?.destroy();
-      viewRef.current = null;
-    };
-  }, [filePath]);
+    return () => { cancelled = true; };
+  }, [activeTab?.id, activeTab?.filePath]);
 
-  // ── Save via REST ────────────────────────────────────────────────────────────
-  function doSave() {
-    const view = viewRef.current;
-    if (!view || !filePath) return;
+  // ── Save current active tab ────────────────────────────────────────────────
+  function doSaveActive() {
+    if (!activeTab) return;
+    const view = tabViewCache.get(activeTab.id);
+    if (!view) return;
     const content = view.state.doc.toString();
     setStatus('saving');
-
     fetch('/api/files/write', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath, content }),
+      body: JSON.stringify({ path: activeTab.filePath, content }),
     })
       .then(r => r.json())
-      .then(({ error }) => {
-        if (error) {
-          setStatus('error');
-          setErrorMsg(error);
-        } else {
+      .then(({ error: e }) => {
+        if (e) { setStatus('error'); setErrorMsg(e); }
+        else {
           setStatus('ready');
-          setIsDirty(false);
-          updateNodeData(nodeId, { isDirty: false });
+          const st = useCanvasStore.getState();
+          const d = st.nodes.find(n => n.id === nodeId)?.data as EditorData | undefined;
+          if (d) {
+            const updatedTabs = (d.tabs || []).map(t =>
+              t.id === activeTab.id ? { ...t, isDirty: false } : t
+            );
+            st.updateNodeData(nodeId, { tabs: updatedTabs } as Partial<EditorData>);
+          }
           setSaveMsg('Salvo');
           setTimeout(() => setSaveMsg(''), 2000);
         }
       })
-      .catch(err => {
-        setStatus('error');
-        setErrorMsg(String(err));
-      });
+      .catch(err => { setStatus('error'); setErrorMsg(String(err)); });
   }
+
+  if (tabs.length === 0) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', height: '100%',
+        background: 'rgba(5,8,20,0.88)',
+        alignItems: 'center', justifyContent: 'center',
+        color: 'rgba(255,255,255,0.2)', fontSize: 13, fontFamily: 'monospace',
+        gap: 8,
+      }}>
+        <span style={{ fontSize: 32 }}>✏️</span>
+        <span>Nenhum arquivo aberto</span>
+        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.12)' }}>
+          Clique em um arquivo no File Browser
+        </span>
+      </div>
+    );
+  }
+
+  const ext = activeTab?.filePath?.split('.').pop() ?? '';
+  const isDirtyActive = activeTab?.isDirty ?? false;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'rgba(5,8,20,0.88)' }}>
       {/* Tab bar */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
-        padding: '0 12px', height: 34,
+        display: 'flex', alignItems: 'stretch', flexShrink: 0,
+        overflowX: 'auto', overflowY: 'hidden',
         background: 'rgba(255,255,255,0.02)',
         borderBottom: '1px solid rgba(255,255,255,0.07)',
+        height: 34, minHeight: 34,
       }}>
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', flexShrink: 0 }}>
-          {langLabel(ext)}
-        </span>
-        <span style={{
-          flex: 1, fontSize: 12, fontFamily: 'monospace',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          color: isDirty ? 'rgba(220,230,245,0.9)' : 'rgba(170,190,225,0.65)',
-        }}>
-          {fileName}{isDirty ? ' ●' : ''}
-        </span>
-        {saveMsg && <span style={{ fontSize: 10, color: '#4ade80', fontFamily: 'monospace' }}>{saveMsg}</span>}
-        {status === 'saving' && <span style={{ fontSize: 10, color: 'rgba(255,200,80,0.8)', fontFamily: 'monospace' }}>Salvando…</span>}
-        <button
-          onClick={doSave}
-          disabled={!isDirty || status === 'saving' || status === 'loading'}
-          title="Salvar (Ctrl+S / ⌘S)"
-          style={{
-            background: isDirty ? 'rgba(100,180,255,0.12)' : 'rgba(255,255,255,0.04)',
-            border: `1px solid ${isDirty ? 'rgba(100,180,255,0.3)' : 'rgba(255,255,255,0.07)'}`,
-            borderRadius: 5, padding: '2px 9px', fontSize: 11, fontFamily: 'monospace',
-            color: isDirty ? 'rgba(140,200,255,0.9)' : 'rgba(255,255,255,0.2)',
-            cursor: isDirty ? 'pointer' : 'default', transition: 'all 0.15s',
-          }}
-        >
-          Salvar
-        </button>
+        {tabs.map(tab => {
+          const isActive = tab.id === activeTabId;
+          const fileName = tab.filePath.split('/').pop() ?? tab.filePath;
+          return (
+            <div
+              key={tab.id}
+              onClick={() => switchTab(tab.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '0 8px 0 12px',
+                borderRight: '1px solid rgba(255,255,255,0.05)',
+                background: isActive ? 'rgba(140,190,255,0.06)' : 'transparent',
+                borderBottom: isActive ? '1px solid rgba(140,190,255,0.4)' : '1px solid transparent',
+                cursor: 'pointer',
+                minWidth: 0, maxWidth: 160,
+                flexShrink: 0,
+                userSelect: 'none',
+              }}
+            >
+              <span style={{
+                fontSize: 12, fontFamily: 'monospace',
+                color: isActive
+                  ? (tab.isDirty ? 'rgba(220,230,245,0.95)' : 'rgba(170,190,225,0.85)')
+                  : 'rgba(255,255,255,0.35)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                flex: 1,
+              }}>
+                {fileName}{tab.isDirty ? ' ●' : ''}
+              </span>
+              <button
+                onClick={e => closeTab(tab.id, e)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: isActive ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.15)',
+                  fontSize: 14, lineHeight: 1, padding: '0 2px',
+                  flexShrink: 0, display: 'flex', alignItems: 'center',
+                }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
+
+        {/* Right side: language + save status */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '0 8px' }}>
+          {saveMsg && <span style={{ fontSize: 10, color: '#4ade80', fontFamily: 'monospace' }}>{saveMsg}</span>}
+          {status === 'saving' && <span style={{ fontSize: 10, color: 'rgba(255,200,80,0.8)', fontFamily: 'monospace' }}>Salvando…</span>}
+          {activeTab && (
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', fontFamily: 'monospace' }}>
+              {langLabel(ext)}
+            </span>
+          )}
+          <button
+            onClick={doSaveActive}
+            disabled={!isDirtyActive || status === 'saving' || status === 'loading'}
+            title="Salvar (Ctrl+S / ⌘S)"
+            style={{
+              background: isDirtyActive ? 'rgba(100,180,255,0.12)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${isDirtyActive ? 'rgba(100,180,255,0.3)' : 'rgba(255,255,255,0.07)'}`,
+              borderRadius: 5, padding: '2px 9px', fontSize: 11, fontFamily: 'monospace',
+              color: isDirtyActive ? 'rgba(140,200,255,0.9)' : 'rgba(255,255,255,0.2)',
+              cursor: isDirtyActive ? 'pointer' : 'default', transition: 'all 0.15s',
+            }}
+          >
+            Salvar
+          </button>
+        </div>
       </div>
 
-      {/* Editor area — container always in DOM so CodeMirror can measure */}
+      {/* Editor area */}
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
         <div
           ref={containerRef}
@@ -239,14 +400,4 @@ export function EditorNode({ nodeId, data }: Props) {
       </div>
     </div>
   );
-}
-
-function langLabel(ext: string): string {
-  const m: Record<string, string> = {
-    ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX',
-    json: 'JSON', css: 'CSS', html: 'HTML', md: 'Markdown',
-    py: 'Python', rs: 'Rust', sh: 'Shell', txt: 'Text',
-    gitignore: 'Git', env: 'Env',
-  };
-  return m[ext.toLowerCase()] ?? (ext.toUpperCase() || 'Text');
 }

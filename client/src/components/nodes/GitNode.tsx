@@ -100,14 +100,25 @@ export function GitNode({ nodeId, data }: Props) {
   const [generating,  setGenerating]  = useState(false);
   const [genErr,      setGenErr]      = useState<string | null>(null);
   const [diff,        setDiff]        = useState<{ file: string; content: string } | null>(null);
-  const [logView,     setLogView]     = useState(false);
   const [logContent,  setLogContent]  = useState('');
-  const [section,     setSection]     = useState<'changes' | 'log'>('changes');
+  const [section,     setSection]     = useState<'changes' | 'log' | 'branches' | 'stash'>('changes');
+
+  // ── Branches state ──────────────────────────────────────────────────────────
+  const [branches,      setBranches]      = useState<Array<{ name: string; current: boolean }>>([]);
+  const [newBranchName, setNewBranchName] = useState('');
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [branchError,   setBranchError]   = useState<string | null>(null);
+
+  // ── Stash state ─────────────────────────────────────────────────────────────
+  const [stashes,     setStashes]     = useState<Array<{ ref: string; message: string; date: string }>>([]);
+  const [stashMsg,    setStashMsg]    = useState('');
+  const [stashLoading, setStashLoading] = useState(false);
+  const [stashError,  setStashError]  = useState<string | null>(null);
 
   // ── Refresh status ──────────────────────────────────────────────────────────
 
   const refresh = useCallback(() => {
-    const reqId = `gs-${++reqC.current}`;
+    const reqId = `gs-${nodeId}-${++reqC.current}`;
     setLoading(true);
     setError(null);
     const unsub = ws.on('git:status', (msg) => {
@@ -125,7 +136,7 @@ export function GitNode({ nodeId, data }: Props) {
   // ── Stage / unstage ─────────────────────────────────────────────────────────
 
   function stageFile(file: string, all = false) {
-    const reqId = `ga-${++reqC.current}`;
+    const reqId = `ga-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:add', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub(); refresh();
@@ -134,7 +145,7 @@ export function GitNode({ nodeId, data }: Props) {
   }
 
   function unstageFile(file: string) {
-    const reqId = `gr-${++reqC.current}`;
+    const reqId = `gr-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:restore', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub(); refresh();
@@ -147,7 +158,7 @@ export function GitNode({ nodeId, data }: Props) {
   function commit() {
     if (!commitMsg.trim() || !status?.staged.length) return;
     setCommitting(true); setCommitErr(null); setCommitOk(false);
-    const reqId = `gc-${++reqC.current}`;
+    const reqId = `gc-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:commit', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub(); setCommitting(false);
@@ -186,7 +197,7 @@ export function GitNode({ nodeId, data }: Props) {
   function commitAndPush() {
     if (!commitMsg.trim() || !status?.staged.length) return;
     setCommitting(true); setCommitErr(null); setCommitOk(false);
-    const reqId = `gc-${++reqC.current}`;
+    const reqId = `gc-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:commit', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub(); setCommitting(false);
@@ -202,7 +213,7 @@ export function GitNode({ nodeId, data }: Props) {
   // ── Push / Pull ─────────────────────────────────────────────────────────────
 
   function startOp(op: 'push' | 'pull') {
-    const reqId = `gp-${++reqC.current}`;
+    const reqId = `gp-${nodeId}-${++reqC.current}`;
     setOpLog({ type: op, output: '', done: false });
     const unsub1 = ws.on(`git:${op}:output`, (msg) => {
       if (msg.reqId !== reqId) return;
@@ -220,7 +231,7 @@ export function GitNode({ nodeId, data }: Props) {
   // ── Show diff ───────────────────────────────────────────────────────────────
 
   function showDiff(file: string, staged: boolean) {
-    const reqId = `gd-${++reqC.current}`;
+    const reqId = `gd-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:diff', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub();
@@ -232,7 +243,7 @@ export function GitNode({ nodeId, data }: Props) {
   // ── Load log ────────────────────────────────────────────────────────────────
 
   function loadLog() {
-    const reqId = `gl-${++reqC.current}`;
+    const reqId = `gl-${nodeId}-${++reqC.current}`;
     setSection('log');
     const unsub = ws.on('git:log', (msg) => {
       if (msg.reqId !== reqId) return;
@@ -245,12 +256,125 @@ export function GitNode({ nodeId, data }: Props) {
   // ── Git init ────────────────────────────────────────────────────────────────
 
   function initRepo() {
-    const reqId = `gi-${++reqC.current}`;
+    const reqId = `gi-${nodeId}-${++reqC.current}`;
     const unsub = ws.on('git:init', (msg) => {
       if (msg.reqId !== reqId) return;
       unsub(); refresh();
     });
     ws.send({ type: 'git:init', reqId, path: repoPath });
+  }
+
+  // ── Branches ────────────────────────────────────────────────────────────────
+
+  function loadBranches() {
+    setBranchLoading(true);
+    setBranchError(null);
+    const reqId = `branches-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:branches', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      setBranchLoading(false);
+      if (msg.error) { setBranchError(msg.error); return; }
+      setBranches(msg.branches || []);
+    });
+    ws.send({ type: 'git:branches', reqId, path: repoPath });
+  }
+
+  function createBranch() {
+    if (!newBranchName.trim()) return;
+    setBranchError(null);
+    const reqId = `branch-create-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:branch:create', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setBranchError(msg.error); return; }
+      setNewBranchName('');
+      loadBranches();
+      refresh();
+    });
+    ws.send({ type: 'git:branch:create', reqId, path: repoPath, name: newBranchName.trim() });
+  }
+
+  function checkoutBranch(name: string) {
+    setBranchError(null);
+    const reqId = `branch-checkout-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:branch:checkout', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setBranchError(msg.error); return; }
+      loadBranches();
+      refresh();
+    });
+    ws.send({ type: 'git:branch:checkout', reqId, path: repoPath, name });
+  }
+
+  function deleteBranch(name: string) {
+    if (!confirm(`Deletar branch "${name}"?`)) return;
+    setBranchError(null);
+    const reqId = `branch-delete-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:branch:delete', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setBranchError(msg.error); return; }
+      loadBranches();
+    });
+    ws.send({ type: 'git:branch:delete', reqId, path: repoPath, name });
+  }
+
+  // ── Stash ────────────────────────────────────────────────────────────────────
+
+  function loadStashes() {
+    setStashLoading(true);
+    setStashError(null);
+    const reqId = `stash-list-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:stash:list', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      setStashLoading(false);
+      if (msg.error) { setStashError(msg.error); return; }
+      setStashes(msg.stashes || []);
+    });
+    ws.send({ type: 'git:stash:list', reqId, path: repoPath });
+  }
+
+  function saveStash() {
+    setStashError(null);
+    const reqId = `stash-save-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:stash:save', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setStashError(msg.error); return; }
+      setStashMsg('');
+      loadStashes();
+      refresh();
+    });
+    ws.send({ type: 'git:stash:save', reqId, path: repoPath, message: stashMsg || undefined });
+  }
+
+  function popStash(ref: string) {
+    setStashError(null);
+    const reqId = `stash-pop-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:stash:pop', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setStashError(msg.error); return; }
+      loadStashes();
+      refresh();
+    });
+    ws.send({ type: 'git:stash:pop', reqId, path: repoPath, ref });
+  }
+
+  function dropStash(ref: string) {
+    if (!confirm(`Remover ${ref}?`)) return;
+    setStashError(null);
+    const reqId = `stash-drop-${nodeId}-${++reqC.current}`;
+    const unsub = ws.on('git:stash:drop', (msg: any) => {
+      if (msg.reqId !== reqId) return;
+      unsub();
+      if (msg.error) { setStashError(msg.error); return; }
+      loadStashes();
+    });
+    ws.send({ type: 'git:stash:drop', reqId, path: repoPath, ref });
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -288,18 +412,24 @@ export function GitNode({ nodeId, data }: Props) {
       </div>
 
       {/* ── Tabs ── */}
-      <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
-        {(['changes', 'log'] as const).map(t => (
-          <button key={t} onClick={() => { setSection(t); if (t === 'log') loadLog(); }} style={{
+      <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0, overflowX: 'auto' }}>
+        {(['changes', 'log', 'branches', 'stash'] as const).map(t => (
+          <button key={t} onClick={() => {
+            setSection(t);
+            if (t === 'log') loadLog();
+            if (t === 'branches') loadBranches();
+            if (t === 'stash') loadStashes();
+          }} style={{
             background: 'none', border: 'none', cursor: 'pointer',
-            padding: '5px 12px', fontSize: 11,
+            padding: '5px 12px', fontSize: 11, whiteSpace: 'nowrap', flexShrink: 0,
             color: section === t ? 'rgba(200,220,255,0.9)' : 'rgba(255,255,255,0.3)',
             borderBottom: `2px solid ${section === t ? 'rgba(120,170,255,0.7)' : 'transparent'}`,
             transition: 'all 0.15s',
           }}>
-            {t === 'changes'
-              ? `Alterações${totalChanged ? ` (${totalChanged})` : ''}`
-              : 'Histórico'}
+            {t === 'changes' ? `Alterações${totalChanged ? ` (${totalChanged})` : ''}`
+              : t === 'log' ? 'Histórico'
+              : t === 'branches' ? `Branches${branches.length ? ` (${branches.length})` : ''}`
+              : `Stash${stashes.length ? ` (${stashes.length})` : ''}`}
           </button>
         ))}
       </div>
@@ -348,6 +478,106 @@ export function GitNode({ nodeId, data }: Props) {
           <pre style={{ margin: 0, padding: '10px 12px', fontSize: 11, fontFamily: 'monospace', lineHeight: 1.6, color: 'rgba(200,215,240,0.8)', whiteSpace: 'pre-wrap', flex: 1 }}>
             {logContent || 'Carregando…'}
           </pre>
+        ) : section === 'branches' ? (
+          /* ── Branches ── */
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            {/* New branch input */}
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0, display: 'flex', gap: 6 }}>
+              <input
+                value={newBranchName}
+                onChange={e => setNewBranchName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') createBranch(); }}
+                placeholder="Nova branch…"
+                style={{
+                  flex: 1, background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6,
+                  padding: '5px 8px', fontSize: 11, color: 'rgba(215,230,250,0.9)',
+                  outline: 'none', fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={createBranch}
+                disabled={!newBranchName.trim()}
+                style={{
+                  background: 'rgba(80,160,80,0.2)', border: '1px solid rgba(74,222,128,0.3)',
+                  borderRadius: 6, color: 'rgba(134,239,172,0.95)', cursor: newBranchName.trim() ? 'pointer' : 'not-allowed',
+                  padding: '5px 10px', fontSize: 11, fontWeight: 600,
+                  opacity: newBranchName.trim() ? 1 : 0.4, whiteSpace: 'nowrap',
+                }}
+              >
+                + Criar
+              </button>
+            </div>
+            {branchError && (
+              <div style={{ padding: '4px 10px', fontSize: 11, color: '#f87171', fontFamily: 'monospace', flexShrink: 0 }}>{branchError}</div>
+            )}
+            {/* Branch list */}
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              {branchLoading ? (
+                <div style={{ padding: 16, color: 'rgba(255,255,255,0.25)', textAlign: 'center', fontSize: 12 }}>Carregando…</div>
+              ) : branches.length === 0 ? (
+                <div style={{ padding: 16, color: 'rgba(255,255,255,0.25)', textAlign: 'center', fontSize: 12 }}>Nenhuma branch encontrada</div>
+              ) : (
+                branches.map(b => (
+                  <BranchRow
+                    key={b.name}
+                    branch={b}
+                    onCheckout={() => checkoutBranch(b.name)}
+                    onDelete={() => deleteBranch(b.name)}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+        ) : section === 'stash' ? (
+          /* ── Stash ── */
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            {/* Stash save input */}
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0, display: 'flex', gap: 6 }}>
+              <input
+                value={stashMsg}
+                onChange={e => setStashMsg(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveStash(); }}
+                placeholder="Mensagem (opcional)…"
+                style={{
+                  flex: 1, background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6,
+                  padding: '5px 8px', fontSize: 11, color: 'rgba(215,230,250,0.9)',
+                  outline: 'none', fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={saveStash}
+                style={{
+                  background: 'rgba(60,120,220,0.2)', border: '1px solid rgba(100,160,255,0.3)',
+                  borderRadius: 6, color: 'rgba(140,190,255,0.9)', cursor: 'pointer',
+                  padding: '5px 10px', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
+                }}
+              >
+                Salvar stash
+              </button>
+            </div>
+            {stashError && (
+              <div style={{ padding: '4px 10px', fontSize: 11, color: '#f87171', fontFamily: 'monospace', flexShrink: 0 }}>{stashError}</div>
+            )}
+            {/* Stash list */}
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              {stashLoading ? (
+                <div style={{ padding: 16, color: 'rgba(255,255,255,0.25)', textAlign: 'center', fontSize: 12 }}>Carregando…</div>
+              ) : stashes.length === 0 ? (
+                <div style={{ padding: 16, color: 'rgba(255,255,255,0.25)', textAlign: 'center', fontSize: 12 }}>Nenhum stash</div>
+              ) : (
+                stashes.map(s => (
+                  <StashRow
+                    key={s.ref}
+                    stash={s}
+                    onPop={() => popStash(s.ref)}
+                    onDrop={() => dropStash(s.ref)}
+                  />
+                ))
+              )}
+            </div>
+          </div>
         ) : isNotRepo ? (
           /* ── Not a git repo ── */
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, padding: 24 }}>
@@ -589,6 +819,121 @@ function FileRow({ file, code, action, onDiff }: {
         >
           {action.label}
         </button>
+      )}
+    </div>
+  );
+}
+
+function BranchRow({ branch, onCheckout, onDelete }: {
+  branch: { name: string; current: boolean };
+  onCheckout: () => void;
+  onDelete: () => void;
+}) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px',
+        background: branch.current ? 'rgba(126,182,255,0.07)' : hov ? 'rgba(255,255,255,0.04)' : 'transparent',
+        transition: 'background 0.1s',
+        borderLeft: branch.current ? '2px solid rgba(126,182,255,0.6)' : '2px solid transparent',
+      }}
+    >
+      <span style={{ fontSize: 10, color: branch.current ? 'rgba(140,190,255,0.9)' : 'rgba(255,255,255,0.3)', minWidth: 10 }}>
+        {branch.current ? '●' : '○'}
+      </span>
+      <span style={{
+        flex: 1, fontSize: 12, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        color: branch.current ? 'rgba(200,220,255,0.95)' : 'rgba(200,215,240,0.75)',
+        fontWeight: branch.current ? 600 : 400,
+      }}>
+        {branch.name}
+      </span>
+      {hov && !branch.current && (
+        <>
+          <button
+            title="Checkout"
+            onClick={onCheckout}
+            style={{
+              background: 'rgba(80,160,80,0.18)', border: '1px solid rgba(74,222,128,0.25)',
+              borderRadius: 5, color: 'rgba(134,239,172,0.9)', cursor: 'pointer',
+              padding: '2px 8px', fontSize: 10, fontWeight: 600,
+            }}
+          >
+            Checkout
+          </button>
+          <button
+            title="Deletar branch"
+            onClick={onDelete}
+            style={{
+              background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.25)',
+              borderRadius: 5, color: 'rgba(248,113,113,0.8)', cursor: 'pointer',
+              width: 20, height: 20, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            ×
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StashRow({ stash, onPop, onDrop }: {
+  stash: { ref: string; message: string; date: string };
+  onPop: () => void;
+  onDrop: () => void;
+}) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: 'flex', alignItems: 'flex-start', gap: 6, padding: '6px 10px',
+        background: hov ? 'rgba(255,255,255,0.04)' : 'transparent',
+        transition: 'background 0.1s', borderBottom: '1px solid rgba(255,255,255,0.03)',
+      }}
+    >
+      <div style={{ flex: 1, overflow: 'hidden' }}>
+        <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'rgba(200,215,240,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ color: 'rgba(140,190,255,0.7)', marginRight: 6 }}>{stash.ref}</span>
+          {stash.message}
+        </div>
+        {stash.date && (
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2, fontFamily: 'monospace' }}>
+            {stash.date.slice(0, 10)}
+          </div>
+        )}
+      </div>
+      {hov && (
+        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+          <button
+            title="Pop (aplicar e remover)"
+            onClick={onPop}
+            style={{
+              background: 'rgba(80,160,80,0.18)', border: '1px solid rgba(74,222,128,0.25)',
+              borderRadius: 5, color: 'rgba(134,239,172,0.9)', cursor: 'pointer',
+              padding: '2px 8px', fontSize: 10, fontWeight: 600,
+            }}
+          >
+            Pop
+          </button>
+          <button
+            title="Drop (remover)"
+            onClick={onDrop}
+            style={{
+              background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.25)',
+              borderRadius: 5, color: 'rgba(248,113,113,0.8)', cursor: 'pointer',
+              padding: '2px 8px', fontSize: 10,
+            }}
+          >
+            Drop
+          </button>
+        </div>
       )}
     </div>
   );
