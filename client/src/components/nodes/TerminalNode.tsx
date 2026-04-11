@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { ws } from '../../ws';
 import { useCanvasStore } from '../../store';
 import { TerminalData, TerminalPane as TerminalPaneData, PreviewData } from '../../types';
+import { useVoiceInput } from '../../hooks/useVoiceInput';
 
 // Matches URLs printed by dev servers: http://localhost:5173 or http://127.0.0.1:3000
 const SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/;
@@ -87,6 +88,10 @@ function TerminalPane({
   const unsubRef = useRef<(() => void)[]>([]);
   const { updateNodeData } = useCanvasStore();
   const [cwd, setCwd] = useState(data.cwd || '~');
+
+  const { isRecording, isSupported: micSupported, toggle: toggleMic } = useVoiceInput({
+    onTranscript: (text) => ws.send({ type: 'terminal:input', id: paneId, data: text }),
+  });
 
   // Boot terminal
   useEffect(() => {
@@ -285,6 +290,27 @@ function TerminalPane({
         >
           ↺
         </button>
+        {micSupported && (
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleMic(); }}
+            title={isRecording ? 'Parar gravação' : 'Transcrever voz para texto'}
+            style={{
+              background: isRecording ? 'rgba(255,80,80,0.15)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${isRecording ? 'rgba(255,80,80,0.5)' : 'rgba(255,255,255,0.08)'}`,
+              borderRadius: 5,
+              color: isRecording ? 'rgba(255,100,100,0.9)' : 'rgba(255,255,255,0.4)',
+              cursor: 'pointer',
+              padding: '1px 7px',
+              fontSize: 12,
+              transition: 'all 0.15s',
+              animation: isRecording ? 'micPulse 1.2s ease-in-out infinite' : 'none',
+            }}
+            onMouseEnter={e => { if (!isRecording) (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.8)'; }}
+            onMouseLeave={e => { if (!isRecording) (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.4)'; }}
+          >
+            {isRecording ? '⏹' : '🎙'}
+          </button>
+        )}
         {showClose && (
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}

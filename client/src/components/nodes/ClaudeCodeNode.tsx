@@ -7,6 +7,7 @@ import { ws } from '../../ws';
 import { useCanvasStore } from '../../store';
 import { TerminalData } from '../../types';
 import { setClaudeActivity, clearClaudeActivity, ActivityKind, ClaudeActivity } from '../../claudeActivityStore';
+import { useVoiceInput } from '../../hooks/useVoiceInput';
 
 interface Props {
   nodeId: string;
@@ -91,6 +92,10 @@ export function ClaudeCodeNode({ nodeId, data, active, width, height }: Props) {
   const lineAccRef = useRef<string>('');
   const [status, setStatus] = useState<'idle'|'connecting'|'ready'|'exited'>('idle');
   const { updateNodeData } = useCanvasStore();
+
+  const { isRecording, isSupported: micSupported, toggle: toggleMic } = useVoiceInput({
+    onTranscript: (text) => ws.send({ type: 'terminal:input', id: nodeId, data: text }),
+  });
 
   // Injeta CSS uma vez
   if (!animsInjected) {
@@ -211,6 +216,25 @@ export function ClaudeCodeNode({ nodeId, data, active, width, height }: Props) {
         <span style={{ flex: 1, fontSize: 10, color: 'rgba(255,255,255,0.22)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {cwd}
         </span>
+        {micSupported && (
+          <button
+            onClick={() => toggleMic()}
+            title={isRecording ? 'Parar gravação' : 'Transcrever voz para texto'}
+            style={{
+              background: isRecording ? 'rgba(255,80,80,0.15)' : 'transparent',
+              border: `1px solid ${isRecording ? 'rgba(255,80,80,0.45)' : 'transparent'}`,
+              borderRadius: 5,
+              color: isRecording ? 'rgba(255,100,100,0.9)' : 'rgba(255,255,255,0.25)',
+              cursor: 'pointer', fontSize: 13, padding: '2px 5px',
+              transition: 'all 0.15s', flexShrink: 0,
+              animation: isRecording ? 'micPulse 1.2s ease-in-out infinite' : 'none',
+            }}
+            onMouseEnter={e => { if (!isRecording) (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.75)'; }}
+            onMouseLeave={e => { if (!isRecording) (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.25)'; }}
+          >
+            {isRecording ? '⏹' : '🎙'}
+          </button>
+        )}
         <button
           onClick={() => ws.send({ type: 'terminal:input', id: nodeId, data: 'claude\n' })}
           title="Reiniciar Claude"
